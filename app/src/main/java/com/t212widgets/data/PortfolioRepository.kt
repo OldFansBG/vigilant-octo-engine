@@ -6,13 +6,10 @@ import com.t212widgets.api.ApiResult
 import com.t212widgets.api.T212Client
 import com.t212widgets.core.SecureStore
 import com.t212widgets.core.accountCurrency
-import com.t212widgets.core.fetchInstrumentNames
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 
@@ -21,25 +18,22 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Three things this deliberately does:
  *
- *  1. **Single-flight.** Ten widgets waking on the same alarm produce one HTTP round trip,
- *     not ten. Concurrent callers await the in-flight refresh instead of starting their own.
- *  2. **Rate-limit respect.** Trading 212 caps `/equity/portfolio` at 1 request per 5s and
- *     `/account/cash` at 1 per 2s, and answers 429 past that. A minimum spacing is enforced
- *     locally, and a 429 arms an exponential backoff so a rate-limited app does not spend
- *     the next hour hammering a closed door.
+ *  1. **Single-flight.** Ten widgets waking on the same alarm produce one pair of HTTP round
+ *     trips, not ten. Concurrent callers await the in-flight refresh instead of starting
+ *     their own.
+ *  2. **Rate-limit respect.** Trading 212 caps `/equity/account/summary` at 1 request per 5s
+ *     and `/equity/positions` at 1 per 1s, and answers 429 past that. A minimum spacing is
+ *     enforced locally, and a 429 arms an exponential backoff so a rate-limited app does not
+ *     spend the next hour hammering a closed door.
  *  3. **Stale-while-error.** A failed refresh never destroys the last good snapshot; the
  *     error rides along on it so widgets can show "last updated 4m ago" instead of blanking.
  */
 object PortfolioRepository {
 
     private const val SNAPSHOT_FILE = "snapshot.json"
-    private const val NAMES_FILE = "instrument_names.json"
 
-    /** Local floor between network refreshes, above Trading 212's documented 5s cap. */
+    /** Local floor between network refreshes, above the tightest documented endpoint cap. */
     private const val MIN_SPACING_MS = 6_000L
-
-    /** Instrument metadata is ~15k rows and rate-limited to 1/50s; refresh it rarely. */
-    private const val NAMES_TTL_MS = 7L * 24 * 60 * 60 * 1000
 
     private val mutex = Mutex()
     private val cached = AtomicReference<Snapshot?>(null)
@@ -65,7 +59,8 @@ object PortfolioRepository {
     }
 
     /**
-     * Fetches cash and portfolio in parallel and stores the merged snapshot.
+     * Fetches the account summary and open positions in parallel, then stores the merged
+     * snapshot.
      *
      * @param force ignore the local minimum-spacing floor (used by the manual refresh
      *   button). The 429 backoff is always honoured, forced or not.
@@ -84,23 +79,24 @@ object PortfolioRepository {
         lastFetchAtMs = now
         val client = T212Client(app)
 
-        val (cashResult, portfolioResult) = coroutineScope {
-            val cash = async { client.accountCash() }
-            val portfolio = async { client.portfolio() }
-            cash.await() to portfolio.await()
+        val (summaryResult, positionsResult) = coroutineScope {
+            val summary = async { client.accountSummary() }
+            val positions = async { client.positions() }
+            summary.await() to positions.await()
         }
 
         val firstError = listOfNotNull(
-            (cashResult as? ApiResult.Err)?.error,
-            (portfolioResult as? ApiResult.Err)?.error,
+            (summaryResult as? ApiResult.Err)?.error,
+            (positionsResult as? ApiResult.Err)?.error,
         ).firstOrNull()
 
         if (firstError != null) {
             noteFailure(firstError)
             // Partial success still beats nothing: keep whichever half came back.
             val merged = (existing ?: empty()).copy(
-                cash = (cashResult as? ApiResult.Ok)?.value ?: existing?.cash,
-                positions = (portfolioResult as? ApiResult.Ok)?.value ?: existing?.positions.orEmpty(),
+                summary = (summaryResult as? ApiResult.Ok)?.value ?: existing?.summary,
+                positions = (positionsResult as? ApiResult.Ok)?.value
+                    ?: existing?.positions.orEmpty(),
                 error = firstError.message,
             )
             return@withLock store(app, merged)
@@ -109,38 +105,26 @@ object PortfolioRepository {
         consecutiveFailures = 0
         backoffUntilMs = 0
 
-        val cash = (cashResult as ApiResult.Ok).value
-        val positions = (portfolioResult as ApiResult.Ok).value
+        val summary = (summaryResult as ApiResult.Ok).value
+        val positions = (positionsResult as ApiResult.Ok).value
 
-        var currency = app.accountCurrency
-        if (currency.isEmpty()) {
-            (client.accountInfo() as? ApiResult.Ok)?.value?.currencyCode
-                ?.takeIf { it.isNotEmpty() }
-                ?.let {
-                    currency = it
-                    app.accountCurrency = it
-                }
-        }
-
-        // Names are cosmetic; a failure here must never cost the user their numbers.
-        val meta = runCatching {
-            instrumentMeta(app, client, positions.map { it.ticker }.toSet())
-        }.getOrDefault(emptyMap<String, String>() to emptyMap())
+        // The summary carries the account currency, so nothing extra has to be fetched for
+        // formatting; cache it so the UI can format before the first refresh completes.
+        val currency = summary.currency.ifEmpty { app.accountCurrency }
+        if (currency.isNotEmpty()) app.accountCurrency = currency
 
         val snapshot = Snapshot(
             fetchedAtMs = System.currentTimeMillis(),
             currency = currency,
-            cash = cash,
+            summary = summary,
             positions = positions,
-            names = meta.first,
-            currencies = meta.second,
             error = null,
         )
         DailyBaseline.observe(app, snapshot)
         store(app, snapshot)
     }
 
-    /** Drops every cached artefact. Used when the API key or environment changes. */
+    /** Drops every cached artefact. Used when the credentials or environment change. */
     fun invalidate(context: Context) {
         val app = context.applicationContext
         cached.set(null)
@@ -148,7 +132,6 @@ object PortfolioRepository {
         backoffUntilMs = 0
         consecutiveFailures = 0
         runCatching { File(app.filesDir, SNAPSHOT_FILE).delete() }
-        runCatching { File(app.filesDir, NAMES_FILE).delete() }
         DailyBaseline.clear(app)
         app.accountCurrency = ""
     }
@@ -172,57 +155,8 @@ object PortfolioRepository {
             is ApiError.RateLimited -> now + (error.retryAfterSec?.times(1000L) ?: 60_000L)
             is ApiError.Unauthorised, is ApiError.Forbidden -> now + 300_000L
             // 10s, 20s, 40s … capped at 5 minutes.
-            else -> now + (10_000L shl (consecutiveFailures - 1).coerceAtMost(5)).coerceAtMost(300_000L)
+            else -> now + (10_000L shl (consecutiveFailures - 1).coerceAtMost(5))
+                .coerceAtMost(300_000L)
         }
     }
-
-    /**
-     * Ticker -> (display name, instrument currency), cached on disk for [NAMES_TTL_MS].
-     * Returns whatever is cached if the download is skipped, disabled, or fails: names are a
-     * nicety and must never hold up the numbers.
-     */
-    private suspend fun instrumentMeta(
-        context: Context,
-        client: T212Client,
-        tickers: Set<String>,
-    ): Pair<Map<String, String>, Map<String, String>> = withContext(Dispatchers.IO) {
-        val file = File(context.filesDir, NAMES_FILE)
-        val cachedNames = runCatching { file.readText() }.getOrNull()?.let(::parseNames)
-        val fresh = file.exists() && System.currentTimeMillis() - file.lastModified() < NAMES_TTL_MS
-        val covered = cachedNames != null && tickers.all { it in cachedNames.first }
-
-        if (!context.fetchInstrumentNames) return@withContext (cachedNames ?: (emptyMap<String, String>() to emptyMap()))
-        if (fresh && covered) return@withContext cachedNames!!
-        if (tickers.isEmpty()) return@withContext (cachedNames ?: (emptyMap<String, String>() to emptyMap()))
-
-        when (val r = client.instrumentNames(tickers)) {
-            is ApiResult.Ok -> {
-                val names = r.value.mapValues { it.value.name }
-                val currencies = r.value.mapValues { it.value.currencyCode }
-                runCatching { file.writeText(serialiseNames(names, currencies)) }
-                names to currencies
-            }
-            is ApiResult.Err -> cachedNames ?: (emptyMap<String, String>() to emptyMap())
-        }
-    }
-
-    private fun parseNames(raw: String): Pair<Map<String, String>, Map<String, String>>? =
-        runCatching {
-            val o = org.json.JSONObject(raw)
-            val names = HashMap<String, String>()
-            val currencies = HashMap<String, String>()
-            val n = o.optJSONObject("names")
-            val c = o.optJSONObject("currencies")
-            n?.keys()?.forEach { names[it] = n.optString(it) }
-            c?.keys()?.forEach { currencies[it] = c.optString(it) }
-            names as Map<String, String> to (currencies as Map<String, String>)
-        }.getOrNull()
-
-    private fun serialiseNames(
-        names: Map<String, String>,
-        currencies: Map<String, String>,
-    ): String = org.json.JSONObject()
-        .put("names", org.json.JSONObject(names as Map<*, *>))
-        .put("currencies", org.json.JSONObject(currencies as Map<*, *>))
-        .toString()
 }

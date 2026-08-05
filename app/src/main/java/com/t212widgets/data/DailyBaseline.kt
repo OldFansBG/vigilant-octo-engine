@@ -43,8 +43,8 @@ object DailyBaseline {
         snapshot.positions.forEach { positions.put(it.ticker, it.currentPrice) }
         p.edit()
             .putInt(K_DAY, today)
-            .putFloat(K_TOTAL, (snapshot.cash?.total ?: 0.0).toFloat())
-            .putFloat(K_PPL, (snapshot.cash?.ppl ?: 0.0).toFloat())
+            .putFloat(K_TOTAL, (snapshot.summary?.totalValue ?: 0.0).toFloat())
+            .putFloat(K_PPL, (snapshot.summary?.unrealizedProfitLoss ?: 0.0).toFloat())
             .putString(K_POSITIONS, positions.toString())
             .apply()
     }

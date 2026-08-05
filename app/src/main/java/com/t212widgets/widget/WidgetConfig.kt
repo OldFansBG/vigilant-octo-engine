@@ -16,15 +16,16 @@ enum class WidgetKind(val label: String, val description: String) {
 /** An account-level number that a SUMMARY or CASH widget can display. */
 enum class Metric(val label: String, val short: String) {
     ACCOUNT_TOTAL("Account value", "Value"),
-    INVESTED("Invested", "Invested"),
+    INVESTMENTS_VALUE("Investments value", "Invested now"),
+    INVESTED("Cost of investments", "Cost"),
     FREE_CASH("Free funds", "Free"),
     OPEN_PL("Open P/L", "P/L"),
     OPEN_PL_PCT("Open P/L %", "P/L %"),
     TODAY_CHANGE("Change today", "Today"),
     TODAY_CHANGE_PCT("Change today %", "Today %"),
     REALISED("Realised result", "Realised"),
-    PIE_CASH("Pie cash", "Pies"),
-    BLOCKED("Blocked", "Blocked"),
+    PIE_CASH("Cash in pies", "Pies"),
+    RESERVED("Reserved for orders", "Reserved"),
     POSITION_COUNT("Number of holdings", "Holdings"),
 }
 
@@ -32,8 +33,9 @@ enum class Metric(val label: String, val short: String) {
 enum class PositionField(val label: String, val short: String) {
     PRICE("Current price", "Price"),
     VALUE("Market value", "Value"),
+    COST("Cost paid", "Cost"),
     QUANTITY("Quantity", "Qty"),
-    AVG_PRICE("Average price", "Avg"),
+    AVG_PRICE("Average price paid", "Avg"),
     PL("Profit / loss", "P/L"),
     PL_PCT("Return %", "Return"),
     TODAY_PCT("Change today %", "Today"),

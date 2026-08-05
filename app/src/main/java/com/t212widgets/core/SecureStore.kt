@@ -13,7 +13,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Encrypted storage for the Trading 212 API key.
+ * Encrypted storage for the Trading 212 API credentials.
  *
  * The key is sealed with AES-256/GCM using a secret that lives inside the Android
  * Keystore. On devices with a secure element or TEE that secret is hardware-backed and
@@ -37,6 +37,9 @@ object SecureStore {
     private const val PREF_CIPHERTEXT = "api_key_ct"
     private const val PREF_IV = "api_key_iv"
     private const val PREF_FINGERPRINT = "api_key_fp"
+
+    /** Separates key from secret inside the sealed blob; legal in neither credential. */
+    private const val SEPARATOR = '\u0000'
 
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val GCM_TAG_BITS = 128
@@ -70,7 +73,7 @@ object SecureStore {
         return generator.generateKey()
     }
 
-    /** True when an API key has been stored. Cheap: does not decrypt anything. */
+    /** True when credentials have been stored. Cheap: does not decrypt anything. */
     fun hasApiKey(context: Context): Boolean =
         prefs(context).contains(PREF_CIPHERTEXT)
 
@@ -81,28 +84,37 @@ object SecureStore {
     fun fingerprint(context: Context): String? =
         prefs(context).getString(PREF_FINGERPRINT, null)
 
-    fun saveApiKey(context: Context, apiKey: String) {
+    /**
+     * Seals the key and secret together.
+     *
+     * Both halves go into one ciphertext separated by a NUL, which cannot occur in either
+     * credential. One encrypt, one IV, and no way to end up with a key stored without its
+     * matching secret.
+     */
+    fun saveCredentials(context: Context, credentials: Credentials) {
+        val plaintext = credentials.apiKey + SEPARATOR + credentials.apiSecret
         val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, secretKey()) }
         val iv = cipher.iv
         check(iv.size == IV_BYTES) { "unexpected IV length" }
-        val ciphertext = cipher.doFinal(apiKey.toByteArray(Charsets.UTF_8))
+        val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
 
         prefs(context).edit()
             .putString(PREF_CIPHERTEXT, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
             .putString(PREF_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
-            .putString(PREF_FINGERPRINT, maskOf(apiKey))
+            .putString(PREF_FINGERPRINT, maskOf(credentials.apiKey))
             .commit()
     }
 
     /**
-     * Returns the decrypted API key, or null when none is stored or the keystore entry has
-     * been invalidated (which happens if the user removes their device lock on some OEMs).
+     * Returns the decrypted credentials, or null when none are stored or the keystore entry
+     * has been invalidated (which happens if the user removes their device lock on some
+     * OEMs).
      */
-    fun readApiKey(context: Context): String? {
+    fun readCredentials(context: Context): Credentials? {
         val p = prefs(context)
         val ct = p.getString(PREF_CIPHERTEXT, null) ?: return null
         val iv = p.getString(PREF_IV, null) ?: return null
-        return try {
+        val plaintext = try {
             val cipher = Cipher.getInstance(TRANSFORMATION).apply {
                 init(
                     Cipher.DECRYPT_MODE,
@@ -112,8 +124,13 @@ object SecureStore {
             }
             String(cipher.doFinal(Base64.decode(ct, Base64.NO_WRAP)), Charsets.UTF_8)
         } catch (_: Exception) {
-            null
+            return null
         }
+        // A blob written before secrets existed has no separator; treat it as a legacy key.
+        return Credentials(
+            apiKey = plaintext.substringBefore(SEPARATOR),
+            apiSecret = plaintext.substringAfter(SEPARATOR, ""),
+        )
     }
 
     /** Wipes the stored key and destroys the keystore secret that protected it. */

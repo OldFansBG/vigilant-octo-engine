@@ -542,7 +542,7 @@ private fun WidgetConfig.withKindDefaults(kind: WidgetKind): WidgetConfig = when
     )
     WidgetKind.CASH -> copy(
         kind = kind,
-        metrics = listOf(Metric.FREE_CASH, Metric.INVESTED, Metric.PIE_CASH),
+        metrics = listOf(Metric.FREE_CASH, Metric.PIE_CASH, Metric.RESERVED),
     )
     WidgetKind.POSITION -> copy(
         kind = kind,

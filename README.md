@@ -8,8 +8,8 @@ updates too slowly and shows the same thing to everybody.
   different widgets.
 - **It updates as fast as Android allows.** Down to every 15 seconds, and instantly the
   moment you turn the screen on — not on the 30-minute timer the widget framework imposes.
-- **Your API key stays sealed on the device.** Hardware-backed encryption, read-only scopes,
-  no server of ours anywhere in the path.
+- **Your API credentials stay sealed on the device.** Hardware-backed encryption, read-only
+  scopes, no server of ours anywhere in the path.
 
 Not affiliated with, endorsed by, or connected to Trading 212.
 
@@ -67,36 +67,42 @@ build. (`.gitignore` already blocks `*.jks` and `keystore.properties` from being
 
 ## Setting it up
 
-1. **Make a read-only API key.** In the Trading 212 app: **Settings → API (Beta) → Generate
-   key**. Turn on only *Account data* and *Portfolio*. Leave every ordering scope off — then
-   the key physically cannot place or cancel a trade, no matter what happens to it. This app
-   only ever issues `GET` requests, and there is no code path in it that can place an order.
-2. **Open T212 Widgets and paste the key.** Tap **Save and connect**. It verifies the key
+1. **Generate API credentials.** In the Trading 212 app: **Settings → API (Beta)** →
+   generate a key. You get back **two** values, an **API Key** and an **API Secret** — the
+   secret is shown *once*, at creation, so copy it there and then. Enable only the read
+   permissions; leave every ordering scope off and the credentials physically cannot place or
+   cancel a trade. This app only ever issues `GET` requests and has no code path that can
+   place an order.
+
+   Do **not** tick "restrict access to trusted IPs" unless you know your phone's public IP is
+   fixed — a mobile connection's address changes constantly and every request will be
+   refused.
+
+   The API works on **Invest** and **Stocks & Shares ISA** accounts only. CFD and SIPP
+   accounts cannot generate a working key.
+2. **Open T212 Widgets and paste both values.** Tap **Save and connect**. It verifies them
    against your account before storing anything, and works out the environment for you — if
-   you pick Live but the key is a Practice key, the probe finds that and switches, rather
-   than leaving you with an unexplained 401.
+   you pick Live but the credentials are for Practice, the probe finds that and switches,
+   rather than leaving you with an unexplained 401.
 
 ### If you get "API key rejected (401)"
 
-The app tries both environments and all three header conventions before reporting this, and
-shows the checklist below in-app. In order of likelihood:
+The app tries both environments before reporting this, and shows the checklist below in-app.
+In order of likelihood:
 
-- **Re-copy the key.** Copying from a browser or a chat app routinely picks up a trailing
-  newline or a zero-width character, neither of which is visible in a password field. (The
-  app now strips these, so this is mostly fixed — but a partially-selected key still fails.)
-- **Check the key still exists** in Trading 212 → Settings → API (Beta). Generating a new key
-  invalidates the old one silently, and so does a password change.
-- **Confirm it is from the account you are trying to view**, and that it has not passed an
-  expiry date if you set one.
-- **Give a brand-new key a minute** — activation is not always instant.
+- **You did not enter the API Secret.** Keys issued now are a *pair*, and Basic auth needs
+  both halves. If you no longer have the secret, generate a new key — it is only ever shown
+  at creation.
+- **The key is IP-restricted.** A phone's address changes; generate one without the
+  restriction.
+- **Wrong account type.** Only Invest and Stocks & Shares ISA accounts can use the API.
+- **The key no longer exists.** Check Settings → API (Beta); generating a new key
+  invalidates the old one, and so can a password change.
+- **A partial copy.** The app strips invisible characters, but a half-selected value still
+  fails.
 
-A **403** is a different thing entirely: the key authenticated fine but lacks a scope. Edit
-the key and enable *Account data* and *Portfolio*.
-3. **Add widgets.** Long-press the home screen → Widgets → *Trading 212 widgets* → drag one
-   out. The builder opens automatically. Repeat for each different view you want.
-4. **Turn off battery optimisation for the app** when the setup screen offers it. On Samsung,
-   Xiaomi, OnePlus and Huawei phones this is the difference between updating every minute and
-   updating whenever you happen to open something.
+A **403** is different: the credentials authenticated but lack a permission. Edit the key and
+enable the account and portfolio read scopes.
 
 ## What you can build
 
@@ -104,11 +110,11 @@ Five widget kinds, each configurable:
 
 | Kind | Shows |
 |---|---|
-| **Account summary** | Account value, open P/L, change today, invested, free funds, realised result, pie cash, blocked, holdings count — any of them, in any order |
-| **Single holding** | One stock: price, market value, quantity, average price, P/L, return %, change today, FX impact |
+| **Account summary** | Account value, investments value, cost, open P/L and P/L %, change today, free funds, realised result, cash in pies, reserved for orders, holdings count — any of them, in any order |
+| **Single holding** | One stock: price, market value, cost paid, quantity, average price, P/L, return %, change today, FX impact |
 | **Holdings list** | Your positions, sorted by value / P/L / return / today / name, with up to three columns of your choice |
 | **Today's movers** | Biggest risers and fallers since this morning, both ends in one widget |
-| **Cash** | Free funds, invested, pie cash, blocked |
+| **Cash** | Free funds, cash in pies, reserved for orders |
 
 Per widget you also choose: title, theme (system / light / dark / transparent), accent
 colour, decimal places, row count, compact numbers (`£1.2k`), whether gains and losses are
@@ -138,23 +144,24 @@ system cannot defer. It costs a permanent notification and noticeably more batte
 limits it to roughly six hours a day, and the app hands back to the normal scheduler
 automatically when that budget runs out. It is off by default and almost nobody needs it.
 
-**Rate limits are respected.** Trading 212 allows one `/equity/portfolio` call every 5
-seconds and one `/account/cash` call every 2. The app enforces a 6-second floor between
+**Rate limits are respected.** Trading 212 allows one `/equity/account/summary` call every 5
+seconds and one `/equity/positions` call per second. The app enforces a 6-second floor between
 network refreshes regardless of your interval setting, collapses concurrent requests from
 multiple widgets into a single fetch, and backs off exponentially on a `429`. Ten widgets on
 your home screen cost exactly the same API traffic as one.
 
 ## Security
 
-The API key is the whole reason to be careful here, so:
+The API credentials are the whole reason to be careful here, so:
 
-- **Encrypted at rest with AES-256-GCM.** The encryption key is generated in and held by the
-  Android Keystore — on most phones inside the secure element, where it cannot be extracted
+- **Encrypted at rest with AES-256-GCM.** Key and secret are sealed into a single ciphertext,
+  so one can never be stored without the other. The encryption key is generated in and held
+  by the Android Keystore — on most phones inside the secure element, where it cannot be extracted
   even from a rooted device. Only ciphertext is ever written to storage, with a fresh random
   IV per write.
-- **Write-only from the UI's point of view.** The setup screen can store a key and show a
-  4-character fingerprint of it; there is no code path that displays the key back. If you
-  forget it, you generate a new one.
+- **Write-only from the UI's point of view.** The setup screen stores credentials and shows a
+  4-character fingerprint of the key; no code path displays either value back. If you lose
+  them, you generate a new pair.
 - **Backups disabled.** `allowBackup="false"`, plus explicit exclusions in both the legacy
   and Android 12+ backup rules, so the key cannot ride a cloud backup or a phone-to-phone
   transfer off the device.
@@ -179,36 +186,40 @@ refresh while the phone is locked and in your pocket, where no biometric prompt 
 requiring authentication to decrypt would break every background refresh. The optional gate
 above protects the operation an attacker with your unlocked phone would actually want.
 
-**Never commit an API key to this repository.** Nothing in the build needs one — the key is
+**Never commit API credentials to this repository.** Nothing in the build needs one — the key is
 entered on the device at runtime and lives only there.
 
 ## Known limits
 
-Honest ones, mostly from the API rather than from this app:
+Honest ones, from the API rather than from this app:
 
 - **Change today is measured from the first update of the day, not the previous close.** The
   public API exposes no previous-close or intraday-open figure, so a true daily change cannot
   be computed. The app records the first values it sees after local midnight and reports
   movement against those. Anything derived from it is labelled *since first update today*.
-- **Per-holding values are in the instrument's currency, not yours.** The API gives prices in
-  the instrument's currency and P/L in your account currency, with no FX rate to bridge them.
-  So market value for a US stock in a GBP account is shown in USD, tagged as such, and
-  account-level totals always come from `/account/cash` rather than from summing positions.
-  Return % is computed from local-currency cost and value, which makes it FX-neutral — the
-  number you usually want.
 - **Prices are as fresh as the API makes them,** which is not a live tick feed. Do not trade
   on these figures.
 - **Sub-minute intervals need the exact-alarm permission** to hold precisely. Without it the
   app asks for a timing window instead and updates drift by a few seconds. It never breaks —
   it just loosens.
-- **Instrument names cost a large download.** The catalogue endpoint returns several
-  megabytes and is rate-limited to one call per 50 seconds, so it is streamed, filtered to
-  the tickers you hold, and cached for a week. Turn it off in settings if you would rather
-  see `AAPL_US_EQ`.
-- **The auth header is auto-detected.** Trading 212's API docs sit behind a login wall, so
-  the app probes the documented raw `Authorization: <key>` form plus `Bearer` and
-  `X-API-Key`, and stores whichever the server accepts. If they change the convention,
-  pressing *Test connection* re-detects it rather than the app simply dying.
+- **Current price and average price are quoted in the instrument's currency.** Everything
+  else — market value, cost, P/L, FX impact — arrives already converted to your account
+  currency by Trading 212, so those figures can be totalled and compared directly.
+
+## API notes
+
+Built against the current public API, as documented at
+[docs.trading212.com/api](https://docs.trading212.com/api):
+
+| | |
+|---|---|
+| Auth | `Authorization: Basic base64(apiKey:apiSecret)`; legacy single-key headers still accepted |
+| Live | `https://live.trading212.com` |
+| Practice | `https://demo.trading212.com` |
+| Account | `GET /api/v0/equity/account/summary` — 1 req / 5s |
+| Positions | `GET /api/v0/equity/positions` — 1 req / 1s |
+
+Credentials are environment-specific and cannot be used across Live and Practice.
 
 ## Building locally
 

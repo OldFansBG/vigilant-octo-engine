@@ -1,20 +1,18 @@
 package com.t212widgets.ui
 
 import android.app.AlarmManager
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,7 +20,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -59,15 +56,13 @@ import androidx.fragment.app.FragmentActivity
 import com.t212widgets.api.ApiError
 import com.t212widgets.api.ApiResult
 import com.t212widgets.api.T212Client
-import com.t212widgets.api.sanitiseKey
+import com.t212widgets.core.Credentials
 import com.t212widgets.core.Environment
 import com.t212widgets.core.Format
 import com.t212widgets.core.SecureStore
 import com.t212widgets.core.Settings
 import com.t212widgets.core.accountCurrency
-import com.t212widgets.core.authScheme
 import com.t212widgets.core.environment
-import com.t212widgets.core.fetchInstrumentNames
 import com.t212widgets.core.liveMode
 import com.t212widgets.core.onlyWhenScreenOn
 import com.t212widgets.core.refreshIntervalSec
@@ -83,8 +78,8 @@ import kotlinx.coroutines.withContext
 /**
  * Setup and status screen.
  *
- * The window carries `FLAG_SECURE`, so the API key cannot appear in a screenshot, a screen
- * recording or the recent-apps thumbnail. It extends [FragmentActivity] because
+ * The window carries `FLAG_SECURE`, so the credentials cannot appear in a screenshot, a
+ * screen recording or the recent-apps thumbnail. It extends [FragmentActivity] because
  * `BiometricPrompt` needs a fragment host.
  */
 class MainActivity : FragmentActivity() {
@@ -151,6 +146,7 @@ private fun SetupScreen(
     val scope = rememberCoroutineScope()
 
     var keyInput by remember { mutableStateOf("") }
+    var secretInput by remember { mutableStateOf("") }
     var hasKey by remember { mutableStateOf(SecureStore.hasApiKey(context)) }
     var fingerprint by remember { mutableStateOf(SecureStore.fingerprint(context)) }
     var environment by remember { mutableStateOf(context.environment) }
@@ -159,7 +155,6 @@ private fun SetupScreen(
     var onUnlock by remember { mutableStateOf(context.refreshOnUnlock) }
     var live by remember { mutableStateOf(context.liveMode) }
     var lockSettings by remember { mutableStateOf(context.requireAuthToReveal) }
-    var names by remember { mutableStateOf(context.fetchInstrumentNames) }
 
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -186,12 +181,18 @@ private fun SetupScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             // ------------------------------------------------------------ API key
-            SectionCard("API key") {
+            SectionCard("API credentials") {
                 Text(
-                    "Create a read-only key in the Trading 212 app: Settings → API (Beta) → " +
-                        "Generate key, and enable only the permissions you want this app to " +
-                        "have. Account data and Portfolio are enough — leave the ordering " +
-                        "scopes switched off and the key literally cannot place a trade.",
+                    "In the Trading 212 app: Settings → API (Beta) → generate a key. You get " +
+                        "an API Key and an API Secret — the secret is shown once, so copy it " +
+                        "there and then. Enable the read permissions you want; leave the " +
+                        "ordering ones off and the credentials cannot place a trade.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Older keys issued without a secret still work — leave the secret box " +
+                        "empty for those.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Spacer(Modifier.height(12.dp))
@@ -199,9 +200,9 @@ private fun SetupScreen(
                 if (hasKey) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("Key stored", fontWeight = FontWeight.Medium)
+                            Text("Credentials stored", fontWeight = FontWeight.Medium)
                             Text(
-                                "${fingerprint ?: "••••"} · ${context.authScheme.label}",
+                                "${fingerprint ?: "••••"} · ${environment.label}",
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
@@ -213,29 +214,33 @@ private fun SetupScreen(
                                 hasKey = false
                                 fingerprint = null
                                 snapshot = null
-                                status = "Key removed from this device"
+                                status = "Removed from this device"
                                 statusIsError = false
                             }
                             if (lockSettings) {
-                                authenticate("Remove the stored API key", remove)
+                                authenticate("Remove the stored credentials", remove)
                             } else {
                                 remove()
                             }
                         }) { Text("Remove") }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "The key is sealed with a hardware-backed Android Keystore secret and " +
-                            "cannot be read back — replace it below if you need to change it.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
                     Spacer(Modifier.height(12.dp))
                 }
 
                 OutlinedTextField(
                     value = keyInput,
                     onValueChange = { keyInput = it },
-                    label = { Text(if (hasKey) "Replace key" else "Paste your API key") },
+                    label = { Text(if (hasKey) "Replace — API Key" else "API Key") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = secretInput,
+                    onValueChange = { secretInput = it },
+                    label = { Text("API Secret") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -256,46 +261,52 @@ private fun SetupScreen(
                         )
                     }
                 }
+                Text(
+                    "Just a starting guess — both are tried automatically.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
 
                 Spacer(Modifier.height(12.dp))
+                val entered = Credentials.of(keyInput, secretInput)
                 Button(
-                    enabled = !busy && (keyInput.isNotBlank() || hasKey),
+                    enabled = !busy && (!entered.isEmpty || hasKey),
                     onClick = {
-                        val candidate = sanitiseKey(keyInput)
                         val proceed: () -> Unit = {
                             busy = true
                             status = null
                             helpText = null
                             scope.launch {
+                                val credentials = if (entered.isEmpty) {
+                                    SecureStore.readCredentials(context)
+                                } else {
+                                    entered
+                                }
                                 val result = withContext(Dispatchers.IO) {
-                                    val keyToTest = candidate.ifBlank { SecureStore.readApiKey(context) }
-                                    if (keyToTest.isNullOrBlank()) {
-                                        null
-                                    } else {
-                                        T212Client(context).detectConnection(keyToTest, environment)
+                                    credentials?.let {
+                                        T212Client(context).detectConnection(it, environment)
                                     }
                                 }
                                 busy = false
                                 when (result) {
                                     null -> {
-                                        status = "No key to test"
+                                        status = "Nothing to test"
                                         statusIsError = true
                                     }
                                     is ApiResult.Ok -> {
                                         val connection = result.value
-                                        if (candidate.isNotBlank()) {
-                                            SecureStore.saveApiKey(context, candidate)
+                                        if (!entered.isEmpty) {
+                                            SecureStore.saveCredentials(context, entered)
                                             PortfolioRepository.invalidate(context)
                                         }
-                                        context.authScheme = connection.scheme
-                                        // The probe may have found the key belongs to the
-                                        // other environment; adopt what actually worked.
+                                        // The probe may have found the credentials belong to
+                                        // the other environment; adopt what actually worked.
                                         context.environment = connection.environment
                                         environment = connection.environment
                                         if (connection.currencyCode.isNotEmpty()) {
                                             context.accountCurrency = connection.currencyCode
                                         }
                                         keyInput = ""
+                                        secretInput = ""
                                         hasKey = true
                                         fingerprint = SecureStore.fingerprint(context)
                                         statusIsError = false
@@ -309,15 +320,15 @@ private fun SetupScreen(
                                     is ApiResult.Err -> {
                                         statusIsError = true
                                         status = result.error.message
-                                        helpText = troubleshoot(result.error)
+                                        helpText = troubleshoot(result.error, entered)
                                     }
                                 }
                             }
                         }
-                        // Replacing a key that is already installed is the sensitive case;
-                        // testing the existing one changes nothing and needs no gate.
-                        if (hasKey && candidate.isNotBlank() && lockSettings) {
-                            authenticate("Replace the stored API key", proceed)
+                        // Replacing credentials that are already installed is the sensitive
+                        // case; testing the existing ones changes nothing and needs no gate.
+                        if (hasKey && !entered.isEmpty && lockSettings) {
+                            authenticate("Replace the stored credentials", proceed)
                         } else {
                             proceed()
                         }
@@ -328,7 +339,7 @@ private fun SetupScreen(
                         CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(12.dp))
                     }
-                    Text(if (keyInput.isBlank() && hasKey) "Test connection" else "Save and connect")
+                    Text(if (entered.isEmpty && hasKey) "Test connection" else "Save and connect")
                 }
 
                 status?.let {
@@ -354,17 +365,19 @@ private fun SetupScreen(
             if (hasKey) {
                 SectionCard("Live data") {
                     val s = snapshot
-                    if (s == null || s.isEmpty) {
+                    val summary = s?.summary
+                    if (s == null || summary == null) {
                         Text(s?.error ?: "No data fetched yet.", style = MaterialTheme.typography.bodyMedium)
                     } else {
                         val ccy = s.currency.ifEmpty { context.accountCurrency }
-                        StatRow("Account value", s.cash?.let { Format.money(it.total, ccy) } ?: "—")
+                        StatRow("Account value", Format.money(summary.totalValue, ccy))
+                        StatRow("Investments", Format.money(summary.investmentsValue, ccy))
                         StatRow(
                             "Open P/L",
-                            s.cash?.let { Format.signedMoney(it.ppl, ccy) } ?: "—",
-                            value = s.cash?.ppl ?: 0.0,
+                            Format.signedMoney(summary.unrealizedProfitLoss, ccy),
+                            value = summary.unrealizedProfitLoss,
                         )
-                        StatRow("Free funds", s.cash?.let { Format.money(it.free, ccy) } ?: "—")
+                        StatRow("Free funds", Format.money(summary.availableToTrade, ccy))
                         StatRow("Holdings", s.positions.size.toString())
                         StatRow("Last update", Format.relativeTime(s.fetchedAtMs))
                         s.error?.let {
@@ -469,31 +482,21 @@ private fun SetupScreen(
                         "remove and re-add it on launchers without that option).",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Spacer(Modifier.height(12.dp))
-                ToggleRow(
-                    "Show company names",
-                    "Downloads the instrument catalogue about once a week so widgets can show " +
-                        "“Apple” instead of AAPL_US_EQ.",
-                    names,
-                ) {
-                    names = it
-                    context.fetchInstrumentNames = it
-                }
             }
 
             // ------------------------------------------------------------ security
             SectionCard("Security") {
-                BulletText("The key is encrypted with AES-256-GCM using a key held in the Android Keystore — on most phones inside the secure element, where it cannot be extracted.")
-                BulletText("Only the ciphertext is written to storage. Backups and cloud restore are disabled for this app, so the key cannot leave the device that way.")
+                BulletText("The key and secret are encrypted together with AES-256-GCM using a key held in the Android Keystore — on most phones inside the secure element, where it cannot be extracted.")
+                BulletText("Only the ciphertext is written to storage. Backups and cloud restore are disabled for this app, so nothing can leave the device that way.")
                 BulletText("This screen sets FLAG_SECURE: no screenshots, no screen recording, and a blank thumbnail in the recents list.")
-                BulletText("Traffic goes to trading212.com over HTTPS only. Cleartext is blocked at the platform level and redirects are never followed, so the key can never be replayed to another host.")
-                BulletText("No analytics, no crash reporting, no server of ours in the middle. The key travels from your phone to Trading 212 and nowhere else.")
-                BulletText("Release builds strip every logging call, so the key cannot end up in logcat.")
+                BulletText("Traffic goes to trading212.com over HTTPS only. Cleartext is blocked at the platform level and redirects are never followed, so the credentials can never be replayed to another host.")
+                BulletText("No analytics, no crash reporting, no server of ours in the middle.")
+                BulletText("Release builds strip every logging call, so nothing can end up in logcat.")
                 Spacer(Modifier.height(12.dp))
                 ToggleRow(
-                    "Require unlock to change the key",
-                    "Asks for your fingerprint, face or PIN before the stored key can be " +
-                        "replaced or removed.",
+                    "Require unlock to change credentials",
+                    "Asks for your fingerprint, face or PIN before the stored credentials can " +
+                        "be replaced or removed.",
                     lockSettings,
                 ) {
                     lockSettings = it
@@ -636,26 +639,43 @@ private const val ACTION_REQUEST_EXACT_ALARM = "android.settings.REQUEST_SCHEDUL
 /**
  * What to actually try next, in the order most likely to help.
  *
- * A bare "401" is useless to someone who has just pasted a key they believe is correct, and
- * by this point the app has already ruled things out on their behalf: the connection probe
- * tried both environments and all three header schemes before giving up, so the remaining
- * causes are all on the Trading 212 side of the account.
+ * A bare "401" is useless to someone who has just pasted credentials they believe are
+ * correct, and by this point the app has already ruled things out on their behalf: the probe
+ * tried both environments before giving up.
  */
-private fun troubleshoot(error: ApiError): List<String>? = when (error) {
-    is ApiError.Unauthorised -> listOf(
-        "The key was tried against both Live and Practice, so it is not a Live/Demo mix-up.",
-        "Re-copy the key from Trading 212 — copying from a browser or chat often adds an " +
-            "invisible character. Select it in one go rather than a long-press drag.",
-        "Check the key still exists: Trading 212 app → Settings → API (Beta). Generating a " +
-            "new key silently invalidates the old one, and so does changing your password.",
-        "Confirm you generated it in the same account you are trying to view, and that it " +
-            "has not expired — keys can be issued with an expiry date.",
-        "If the key is brand new, give it a minute; activation is not always instant.",
-    )
+private fun troubleshoot(error: ApiError, entered: Credentials): List<String>? = when (error) {
+    is ApiError.Unauthorised -> buildList {
+        if (entered.isLegacy) {
+            add(
+                "No API Secret was entered. Keys generated recently come as a Key *and* a " +
+                    "Secret, and the pair is required — paste the secret into the second box.",
+            )
+            add(
+                "If you no longer have the secret, generate a new key in Trading 212: the " +
+                    "secret is only ever shown once, at creation.",
+            )
+        }
+        add("Both Live and Practice were tried, so this is not an environment mix-up.")
+        add(
+            "Re-copy both values. Copying from a browser or chat often adds an invisible " +
+                "character, which is not visible in a password field.",
+        )
+        add(
+            "Check the key still exists: Trading 212 app → Settings → API (Beta). Generating " +
+                "a new key invalidates the old one, and so can changing your password.",
+        )
+        add(
+            "The API only works on Invest and Stocks ISA accounts — not CFD, and not SIPP.",
+        )
+        add(
+            "If you restricted the key to specific IPs when creating it, your phone's mobile " +
+                "or Wi-Fi address will not match. Generate one without an IP restriction.",
+        )
+    }
     is ApiError.Forbidden -> listOf(
-        "The key itself is valid — it just is not allowed to read this data.",
-        "In Trading 212 → Settings → API (Beta), edit the key and enable Account data and " +
-            "Portfolio, then press Test connection again.",
+        "The credentials are valid — they just are not allowed to read this data.",
+        "In Trading 212 → Settings → API (Beta), edit the key and enable the account and " +
+            "portfolio read permissions, then press Test connection again.",
     )
     is ApiError.RateLimited -> listOf(
         "Trading 212 is throttling requests. Wait a minute and try again.",
