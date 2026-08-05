@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  updatePeriodMillis is deliberately 0.
+
+  The widget framework refuses anything under 30 minutes, which is exactly the staleness
+  this app exists to fix. Setting it to zero disables the framework's own timer entirely and
+  hands scheduling to RefreshScheduler, which runs on alarms, screen-on events and a
+  WorkManager floor instead.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:configure="com.t212widgets.ui.WidgetConfigActivity"
+    android:description="@string/widget_description"
+    android:initialLayout="@layout/widget_loading"
+    android:minHeight="40dp"
+    android:minWidth="110dp"
+    android:minResizeHeight="40dp"
+    android:minResizeWidth="110dp"
+    android:previewImage="@drawable/widget_preview"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellHeight="2"
+    android:targetCellWidth="3"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen"
+    android:widgetFeatures="reconfigurable" />

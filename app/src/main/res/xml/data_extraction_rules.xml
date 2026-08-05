@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ equivalent of backup_rules.xml. `device-transfer` covers phone-to-phone setup;
+  excluding the key there matters because the Keystore secret protecting it does not move
+  with the file, so a transferred copy would be useless anyway — and it should not travel.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="t212_secure.xml" />
+        <exclude domain="sharedpref" path="t212_settings.xml" />
+        <exclude domain="file" path="snapshot.json" />
+        <exclude domain="file" path="instrument_names.json" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="t212_secure.xml" />
+        <exclude domain="file" path="snapshot.json" />
+    </device-transfer>
+</data-extraction-rules>

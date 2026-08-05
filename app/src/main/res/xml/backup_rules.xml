@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Belt and braces: allowBackup is already false in the manifest, so nothing here is ever
+  backed up. These rules exist so that if backup is ever turned on, the encrypted key and the
+  cached portfolio still stay off Google's servers.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="t212_secure.xml" />
+    <exclude domain="sharedpref" path="t212_settings.xml" />
+    <exclude domain="file" path="snapshot.json" />
+    <exclude domain="file" path="instrument_names.json" />
+</full-backup-content>

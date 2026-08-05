@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">T212 Widgets</string>
+    <string name="widget_label">Trading 212 widgets</string>
+    <string name="widget_description">Portfolio, holdings and cash — pick what each widget shows.</string>
+</resources>
