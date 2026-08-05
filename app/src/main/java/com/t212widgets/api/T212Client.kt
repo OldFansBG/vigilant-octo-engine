@@ -23,7 +23,7 @@ import javax.net.ssl.HttpsURLConnection
 sealed class ApiError(val message: String) {
     object NoKey : ApiError("No API key set — open the app")
     object Unauthorised : ApiError("API key rejected (401)")
-    object Forbidden : ApiError("Key lacks the required scope (403)")
+    object Forbidden : ApiError("Key needs the Account data + Portfolio scopes (403)")
     class RateLimited(val retryAfterSec: Int?) : ApiError("Rate limited — backing off")
     class Http(val code: Int) : ApiError("Server error $code")
     class Network(val detail: String) : ApiError("Offline or unreachable")
@@ -62,36 +62,57 @@ class T212Client(private val context: Context) {
         getJsonArray("/api/v0/equity/portfolio").map(Position::listFromJson)
 
     /**
-     * Probes the stored key against every [AuthScheme] and returns the first that the server
-     * accepts, together with the account info it returned. Used by "Test connection" so the
-     * app self-heals if Trading 212 changes the header convention.
+     * Works out how to talk to Trading 212 with this key, by trying every combination that
+     * could plausibly be right: both environments against all three header schemes.
+     *
+     * Two things make brute force the correct approach here rather than a lazy one. Trading
+     * 212 issues keys per environment, and a Live key sent to the demo host (or the reverse)
+     * comes back as a flat 401 with no hint that the host is the problem — which is by far
+     * the most common reason setup fails. And rejected requests are not counted against the
+     * per-endpoint rate limits, so probing costs nothing but a few hundred milliseconds.
+     *
+     * The probe hits `/equity/account/cash` (one request per 2s) rather than `/account/info`
+     * (one per 30s), so even the full six-way sweep stays comfortably inside the budget.
      */
-    suspend fun detectAuthScheme(
-        apiKey: String,
-        environment: Environment,
-    ): ApiResult<Pair<AuthScheme, AccountInfo>> = withContext(Dispatchers.IO) {
-        var lastError: ApiError = ApiError.Network("not attempted")
-        for (scheme in AuthScheme.entries) {
-            when (val r = request("/api/v0/equity/account/info", apiKey, scheme, environment)) {
-                is ApiResult.Ok -> {
-                    val parsed = runCatching { AccountInfo.fromJson(JSONObject(r.value)) }
-                    return@withContext parsed.fold(
-                        onSuccess = { ApiResult.Ok(scheme to it) },
-                        onFailure = { ApiResult.Err(ApiError.Parse(it.javaClass.simpleName)) },
-                    )
-                }
-                is ApiResult.Err -> {
-                    lastError = r.error
-                    // A rate limit or an outage says nothing about the scheme; stop probing
-                    // rather than burning the remaining quota on the other two.
-                    if (r.error !is ApiError.Unauthorised && r.error !is ApiError.Forbidden) {
-                        return@withContext ApiResult.Err(r.error)
+    suspend fun detectConnection(
+        rawKey: String,
+        preferred: Environment,
+    ): ApiResult<Connection> = withContext(Dispatchers.IO) {
+        val apiKey = sanitiseKey(rawKey)
+        if (apiKey.isEmpty()) return@withContext ApiResult.Err(ApiError.NoKey)
+
+        // Try the environment the user picked first, so the common case is one request.
+        val environments = listOf(preferred) + Environment.entries.filter { it != preferred }
+        var bestError: ApiError = ApiError.Network("not attempted")
+
+        for (environment in environments) {
+            for (scheme in AuthScheme.entries) {
+                when (val r = request("/api/v0/equity/account/cash", apiKey, scheme, environment)) {
+                    is ApiResult.Ok -> {
+                        val currency = accountCurrency(apiKey, scheme, environment)
+                        return@withContext ApiResult.Ok(Connection(environment, scheme, currency))
+                    }
+                    is ApiResult.Err -> {
+                        // Being offline or rate limited says nothing about the credentials,
+                        // so stop rather than reporting a misleading "key rejected".
+                        if (r.error is ApiError.Network || r.error is ApiError.RateLimited) {
+                            return@withContext ApiResult.Err(r.error)
+                        }
+                        // A 403 means the key authenticated but lacks a scope — far more
+                        // useful to report than yet another 401, so let it win.
+                        if (bestError !is ApiError.Forbidden) bestError = r.error
                     }
                 }
             }
         }
-        ApiResult.Err(lastError)
+        ApiResult.Err(bestError)
     }
+
+    /** Best-effort account currency; a failure here must not fail the whole connection. */
+    private fun accountCurrency(apiKey: String, scheme: AuthScheme, environment: Environment): String =
+        (request("/api/v0/equity/account/info", apiKey, scheme, environment) as? ApiResult.Ok)
+            ?.let { runCatching { AccountInfo.fromJson(JSONObject(it.value)).currencyCode }.getOrNull() }
+            .orEmpty()
 
     /**
      * Streams `/equity/metadata/instruments` and pulls out display names for the tickers we
@@ -229,6 +250,29 @@ class T212Client(private val context: Context) {
         }
     }
 }
+
+/** A working combination of environment and header scheme, plus what the account is in. */
+data class Connection(
+    val environment: Environment,
+    val scheme: AuthScheme,
+    val currencyCode: String,
+)
+
+/**
+ * Removes anything a clipboard may have carried along with the key.
+ *
+ * Copying from a phone browser or a messaging app routinely picks up a trailing newline, a
+ * non-breaking space, or a zero-width character. None of those are visible in a password
+ * field, and all of them turn a perfectly good key into a 401.
+ */
+internal fun sanitiseKey(raw: String): String =
+    raw.filterNot { c ->
+        c.isWhitespace() ||
+            c == '​' || // zero-width space
+            c == '‌' || // zero-width non-joiner
+            c == '‍' || // zero-width joiner
+            c == '﻿' // byte-order mark
+    }
 
 data class InstrumentMeta(val name: String, val shortName: String, val currencyCode: String)
 

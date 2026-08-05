@@ -71,8 +71,27 @@ build. (`.gitignore` already blocks `*.jks` and `keystore.properties` from being
    key**. Turn on only *Account data* and *Portfolio*. Leave every ordering scope off — then
    the key physically cannot place or cancel a trade, no matter what happens to it. This app
    only ever issues `GET` requests, and there is no code path in it that can place an order.
-2. **Open T212 Widgets and paste the key.** Choose Live or Practice, tap **Save and
-   connect**. It verifies the key against your account before storing anything.
+2. **Open T212 Widgets and paste the key.** Tap **Save and connect**. It verifies the key
+   against your account before storing anything, and works out the environment for you — if
+   you pick Live but the key is a Practice key, the probe finds that and switches, rather
+   than leaving you with an unexplained 401.
+
+### If you get "API key rejected (401)"
+
+The app tries both environments and all three header conventions before reporting this, and
+shows the checklist below in-app. In order of likelihood:
+
+- **Re-copy the key.** Copying from a browser or a chat app routinely picks up a trailing
+  newline or a zero-width character, neither of which is visible in a password field. (The
+  app now strips these, so this is mostly fixed — but a partially-selected key still fails.)
+- **Check the key still exists** in Trading 212 → Settings → API (Beta). Generating a new key
+  invalidates the old one silently, and so does a password change.
+- **Confirm it is from the account you are trying to view**, and that it has not passed an
+  expiry date if you set one.
+- **Give a brand-new key a minute** — activation is not always instant.
+
+A **403** is a different thing entirely: the key authenticated fine but lacks a scope. Edit
+the key and enable *Account data* and *Portfolio*.
 3. **Add widgets.** Long-press the home screen → Widgets → *Trading 212 widgets* → drag one
    out. The builder opens automatically. Repeat for each different view you want.
 4. **Turn off battery optimisation for the app** when the setup screen offers it. On Samsung,

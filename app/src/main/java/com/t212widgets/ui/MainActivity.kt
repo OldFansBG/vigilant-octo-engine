@@ -56,8 +56,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import com.t212widgets.api.ApiError
 import com.t212widgets.api.ApiResult
 import com.t212widgets.api.T212Client
+import com.t212widgets.api.sanitiseKey
 import com.t212widgets.core.Environment
 import com.t212widgets.core.Format
 import com.t212widgets.core.SecureStore
@@ -161,6 +163,7 @@ private fun SetupScreen(
 
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
+    var helpText by remember { mutableStateOf<List<String>?>(null) }
     var statusIsError by remember { mutableStateOf(false) }
     var snapshot by remember { mutableStateOf(PortfolioRepository.cachedSnapshot(context)) }
     val widgetCount = remember { placedWidgetCount(context) }
@@ -258,17 +261,18 @@ private fun SetupScreen(
                 Button(
                     enabled = !busy && (keyInput.isNotBlank() || hasKey),
                     onClick = {
-                        val candidate = keyInput.trim()
+                        val candidate = sanitiseKey(keyInput)
                         val proceed: () -> Unit = {
                             busy = true
                             status = null
+                            helpText = null
                             scope.launch {
                                 val result = withContext(Dispatchers.IO) {
                                     val keyToTest = candidate.ifBlank { SecureStore.readApiKey(context) }
                                     if (keyToTest.isNullOrBlank()) {
                                         null
                                     } else {
-                                        T212Client(context).detectAuthScheme(keyToTest, environment)
+                                        T212Client(context).detectConnection(keyToTest, environment)
                                     }
                                 }
                                 busy = false
@@ -278,21 +282,26 @@ private fun SetupScreen(
                                         statusIsError = true
                                     }
                                     is ApiResult.Ok -> {
-                                        val (scheme, info) = result.value
+                                        val connection = result.value
                                         if (candidate.isNotBlank()) {
                                             SecureStore.saveApiKey(context, candidate)
                                             PortfolioRepository.invalidate(context)
                                         }
-                                        context.authScheme = scheme
-                                        context.environment = environment
-                                        if (info.currencyCode.isNotEmpty()) {
-                                            context.accountCurrency = info.currencyCode
+                                        context.authScheme = connection.scheme
+                                        // The probe may have found the key belongs to the
+                                        // other environment; adopt what actually worked.
+                                        context.environment = connection.environment
+                                        environment = connection.environment
+                                        if (connection.currencyCode.isNotEmpty()) {
+                                            context.accountCurrency = connection.currencyCode
                                         }
                                         keyInput = ""
                                         hasKey = true
                                         fingerprint = SecureStore.fingerprint(context)
                                         statusIsError = false
-                                        status = "Connected · ${environment.label} · ${info.currencyCode}"
+                                        val ccy = connection.currencyCode
+                                        status = "Connected · ${connection.environment.label}" +
+                                            if (ccy.isEmpty()) "" else " · $ccy"
                                         RefreshScheduler.reconcile(context)
                                         RefreshScheduler.refreshAndRedraw(context, force = true)
                                         snapshot = PortfolioRepository.cachedSnapshot(context)
@@ -300,6 +309,7 @@ private fun SetupScreen(
                                     is ApiResult.Err -> {
                                         statusIsError = true
                                         status = result.error.message
+                                        helpText = troubleshoot(result.error)
                                     }
                                 }
                             }
@@ -332,6 +342,11 @@ private fun SetupScreen(
                         },
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                }
+
+                helpText?.let { lines ->
+                    Spacer(Modifier.height(8.dp))
+                    lines.forEach { BulletText(it) }
                 }
             }
 
@@ -617,3 +632,42 @@ private fun BulletText(text: String) {
  * not drag an API-31 symbol into code paths that run on older releases.
  */
 private const val ACTION_REQUEST_EXACT_ALARM = "android.settings.REQUEST_SCHEDULE_EXACT_ALARM"
+
+/**
+ * What to actually try next, in the order most likely to help.
+ *
+ * A bare "401" is useless to someone who has just pasted a key they believe is correct, and
+ * by this point the app has already ruled things out on their behalf: the connection probe
+ * tried both environments and all three header schemes before giving up, so the remaining
+ * causes are all on the Trading 212 side of the account.
+ */
+private fun troubleshoot(error: ApiError): List<String>? = when (error) {
+    is ApiError.Unauthorised -> listOf(
+        "The key was tried against both Live and Practice, so it is not a Live/Demo mix-up.",
+        "Re-copy the key from Trading 212 — copying from a browser or chat often adds an " +
+            "invisible character. Select it in one go rather than a long-press drag.",
+        "Check the key still exists: Trading 212 app → Settings → API (Beta). Generating a " +
+            "new key silently invalidates the old one, and so does changing your password.",
+        "Confirm you generated it in the same account you are trying to view, and that it " +
+            "has not expired — keys can be issued with an expiry date.",
+        "If the key is brand new, give it a minute; activation is not always instant.",
+    )
+    is ApiError.Forbidden -> listOf(
+        "The key itself is valid — it just is not allowed to read this data.",
+        "In Trading 212 → Settings → API (Beta), edit the key and enable Account data and " +
+            "Portfolio, then press Test connection again.",
+    )
+    is ApiError.RateLimited -> listOf(
+        "Trading 212 is throttling requests. Wait a minute and try again.",
+        "If this keeps happening, raise the refresh interval below.",
+    )
+    is ApiError.Network -> listOf(
+        "The request never reached Trading 212. Check the phone is online.",
+        "A VPN or a filtering DNS service can block trading212.com — try turning it off.",
+    )
+    is ApiError.Http -> listOf(
+        "Trading 212 returned an unexpected status. This is usually their end; try again " +
+            "shortly.",
+    )
+    else -> null
+}
