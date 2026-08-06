@@ -691,8 +691,12 @@ private fun troubleshoot(error: ApiError, entered: Credentials): List<String>? =
             "portfolio read permissions, then press Test connection again.",
     )
     is ApiError.RateLimited -> listOf(
-        "Trading 212 is throttling requests. Wait a minute and try again.",
-        "If this keeps happening, raise the refresh interval below.",
+        "Trading 212 caps the account summary at one request every 5 seconds, and the cap " +
+            "is per account — every widget, this screen, and anything else you run against " +
+            "the same account share it. Testing twice in quick succession is enough to hit " +
+            "it. Nothing is wrong with your key.",
+        "The app waits out the window on its own and carries on; you do not have to do " +
+            "anything. If you see it constantly, raise the refresh interval below.",
     )
     is ApiError.Offline -> listOf(
         "The phone reports no working internet connection. Check Wi-Fi or mobile data.",

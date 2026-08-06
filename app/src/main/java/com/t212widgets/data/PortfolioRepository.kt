@@ -34,6 +34,13 @@ object PortfolioRepository {
 
     private const val SNAPSHOT_FILE = "snapshot.json"
 
+    /**
+     * How long a forced refresh will sit waiting for the rate limiter before reporting back
+     * instead. Comfortably inside [com.t212widgets.refresh.RefreshReceiver]'s deadline, so a
+     * wait always ends in either fresh data or a message — never a silently killed request.
+     */
+    private const val FORCED_WAIT_BUDGET_SEC = 8
+
     private val mutex = Mutex()
     private val cached = AtomicReference<Snapshot?>(null)
 
@@ -78,12 +85,27 @@ object PortfolioRepository {
         // A forced refresh is the user pressing a button. Swallowing it because a previous
         // failure armed a backoff is how the app came to look completely dead: tapping the
         // widget or "Refresh now" made no request at all and produced no feedback. An
-        // explicit instruction clears the penalty; the per-endpoint pacing below (1s/5s)
-        // still protects the actual rate limit.
+        // explicit instruction drops *our* penalty and goes to the network.
+        //
+        // What it must not drop is the server's. Trading 212's budget is per account and its
+        // 429 tells us when the window reopens; forcing through that earns another 429 and
+        // extends the block, so pressing the button repeatedly would keep the app throttled
+        // rather than fix it. When the wait is short the request below simply waits it out;
+        // when it is long the user is told how long, which is at least an honest answer
+        // instead of a button that appears to do nothing.
         if (force) {
             backoffUntilMs = 0
             consecutiveFailures = 0
-            RateLimiter.clearPenalties()
+            val waitSec = RateLimiter.waitSeconds(T212Client.PATH_POSITIONS)
+            if (waitSec > FORCED_WAIT_BUDGET_SEC) {
+                return@withLock store(
+                    app,
+                    (existing ?: empty()).copy(
+                        error = "Rate limited — next update in ${waitSec}s",
+                        needsAttention = false,
+                    ),
+                )
+            }
         } else if (now < backoffUntilMs) {
             return@withLock existing ?: empty()
         }

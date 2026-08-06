@@ -33,7 +33,18 @@ sealed class ApiError(val message: String) {
     object NoKey : ApiError("No API key set — open the app")
     object Unauthorised : ApiError("API key rejected (401)")
     object Forbidden : ApiError("Key is missing a permission (403)")
-    class RateLimited(val retryAfterSec: Int?) : ApiError("Rate limited — backing off")
+    /**
+     * The account's request budget for this endpoint is spent. [retryAfterSec] is how long
+     * until it reopens, so the message can say that rather than the useless "backing off" —
+     * a countdown reads as the app working correctly, which it is.
+     */
+    class RateLimited(val retryAfterSec: Int?) : ApiError(
+        if (retryAfterSec != null && retryAfterSec > 0) {
+            "Rate limited — next try in ${retryAfterSec}s"
+        } else {
+            "Rate limited — retrying shortly"
+        },
+    )
     class Http(val code: Int) : ApiError("Server error $code")
 
     /** The device itself has no usable network. */
@@ -88,8 +99,14 @@ class T212Client(private val context: Context) {
      *
      * Keys are issued per environment and cannot be used across them, and a Live key sent to
      * the demo host comes back as a flat 401 with no hint that the host is the problem —
-     * which is the most common reason setup fails. Rejected requests are not counted against
-     * the rate limits, so sweeping both costs nothing but a few hundred milliseconds.
+     * which is the most common reason setup fails.
+     *
+     * Each probe goes through [RateLimiter] like any other request. It is the same
+     * `/equity/account/summary` the widgets use, on the same 1-request-per-5-seconds budget,
+     * and that budget is per *account* — so a probe that skipped the queue would compete with
+     * whatever background refresh had just run. Pressing "Test connection" twice in a row was
+     * enough to earn a 429, which then looked like a broken key rather than an impatient
+     * button. The wait is a few seconds at worst and only happens during setup.
      */
     suspend fun detectConnection(
         credentials: Credentials,
@@ -102,6 +119,7 @@ class T212Client(private val context: Context) {
         var bestError: ApiError = ApiError.Unreachable("not attempted")
 
         for (environment in environments) {
+            RateLimiter.acquire(PATH_SUMMARY)
             when (val r = request(PATH_SUMMARY, credentials, environment)) {
                 is ApiResult.Ok -> {
                     val summary = runCatching { AccountSummary.fromJson(JSONObject(r.value)) }
@@ -234,9 +252,11 @@ class T212Client(private val context: Context) {
             401 -> ApiError.Unauthorised
             403 -> ApiError.Forbidden
             429 -> {
-                val retryAfter = conn.getHeaderField("Retry-After")?.toIntOrNull()
-                RateLimiter.onRateLimited(path, retryAfter)
-                ApiError.RateLimited(retryAfter)
+                RateLimiter.onRateLimited(path, conn.getHeaderField("Retry-After")?.toIntOrNull())
+                // Reported after the limiter has taken both `Retry-After` and the response's
+                // own `x-ratelimit-reset` into account, so the countdown shown to the user is
+                // the one the app will actually honour.
+                ApiError.RateLimited(RateLimiter.waitSeconds(path))
             }
             else -> ApiError.Http(code)
         }

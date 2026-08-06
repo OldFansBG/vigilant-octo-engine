@@ -1,6 +1,8 @@
 package com.t212widgets.api
 
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.net.HttpURLConnection
 import java.util.concurrent.ConcurrentHashMap
 
@@ -27,19 +29,29 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object RateLimiter {
 
-    /** Documented limits, used until the server tells us otherwise. */
-    private val documentedSpacingMs = mapOf(
+    /** Documented periods, in milliseconds, used until the server tells us otherwise. */
+    private val documentedPeriodMs = mapOf(
         "/api/v0/equity/positions" to 1_000L,
         "/api/v0/equity/account/summary" to 5_000L,
     )
 
-    private const val DEFAULT_SPACING_MS = 5_000L
+    private const val DEFAULT_PERIOD_MS = 5_000L
 
     /**
-     * Requests are paced a touch slower than the strict minimum. The limiter is per account,
-     * so a second device — or the odd retry — should not be enough to tip us into a 429.
+     * Requests are paced deliberately slower than the strict minimum.
+     *
+     * Trading 212's limiter is a *fixed window*, not a minimum gap: "1 request per 5 seconds"
+     * means one request per five-second bucket, and the documentation is explicit that a
+     * whole budget may be spent in a burst at the start of a window. Pacing at exactly the
+     * documented figure therefore fails about as often as it works — two requests 5.0s apart
+     * land in the same bucket whenever the first one arrives late in a window, and the second
+     * comes back 429. The margin here is what keeps consecutive requests in consecutive
+     * buckets.
+     *
+     * The limits are also per *account* rather than per key, so this app's requests share a
+     * budget with anything else the user runs against the same account.
      */
-    private const val SAFETY_FACTOR = 1.15
+    private const val SAFETY_FACTOR = 1.25
 
     /**
      * Hard ceilings on anything derived from server headers.
@@ -55,14 +67,29 @@ object RateLimiter {
 
     private data class Budget(
         val spacingMs: Long,
+        /** The window length the server reports, used to size a blind 429 backoff. */
+        val periodMs: Long,
         val lastRequestAtMs: Long = 0L,
         val blockedUntilMs: Long = 0L,
     )
 
     private val budgets = ConcurrentHashMap<String, Budget>()
 
-    private fun budget(path: String): Budget =
-        budgets[path] ?: Budget(spacingMs = documentedSpacingMs[path] ?: DEFAULT_SPACING_MS)
+    /**
+     * One gate per endpoint, so the check-then-record in [acquire] cannot interleave.
+     *
+     * Without this, two callers can both see "free right now" before either records its
+     * attempt and fire simultaneously — which spends a 1-request budget twice and earns a
+     * 429. That is not hypothetical: the live screen polls positions while the alarm chain
+     * and the unlock trigger can fire on the same endpoint.
+     */
+    private val gates = ConcurrentHashMap<String, Mutex>()
+
+    private fun budget(path: String): Budget {
+        budgets[path]?.let { return it }
+        val period = documentedPeriodMs[path] ?: DEFAULT_PERIOD_MS
+        return Budget(spacingMs = (period * SAFETY_FACTOR).toLong(), periodMs = period)
+    }
 
     /** Milliseconds until [path] may be called again; 0 when it is free right now. */
     fun waitMs(path: String, now: Long = System.currentTimeMillis()): Long {
@@ -72,15 +99,21 @@ object RateLimiter {
         return maxOf(untilSpacing, untilUnblocked, 0L)
     }
 
-    /** Suspends until [path] is allowed, then records the attempt. */
+    /**
+     * Suspends until [path] is allowed, then records the attempt.
+     *
+     * Waiting and recording happen under the endpoint's own gate, so concurrent callers queue
+     * behind each other instead of all deciding at once that the endpoint is free.
+     */
     suspend fun acquire(path: String) {
-        while (true) {
-            val wait = waitMs(path)
-            if (wait <= 0) break
-            delay(wait)
+        gates.computeIfAbsent(path) { Mutex() }.withLock {
+            while (true) {
+                val wait = waitMs(path)
+                if (wait <= 0) break
+                delay(wait)
+            }
+            budgets[path] = budget(path).copy(lastRequestAtMs = System.currentTimeMillis())
         }
-        val b = budget(path)
-        budgets[path] = b.copy(lastRequestAtMs = System.currentTimeMillis())
     }
 
     /** True when [path] could be called right now without waiting. */
@@ -98,10 +131,14 @@ object RateLimiter {
         val periodSec = conn.headerInt("x-ratelimit-period") ?: return
         if (limit <= 0 || periodSec <= 0) return
 
-        val evenSpacing = (periodSec * 1000.0 / limit * SAFETY_FACTOR).toLong().coerceAtLeast(200L)
+        val periodMs = periodSec * 1000L
+        val evenSpacing = (periodMs.toDouble() / limit * SAFETY_FACTOR).toLong().coerceAtLeast(200L)
 
         val now = System.currentTimeMillis()
+        // `x-ratelimit-used` is the other half of the same fact, and is sometimes the only
+        // one of the pair present.
         val remaining = conn.headerInt("x-ratelimit-remaining")
+            ?: conn.headerInt("x-ratelimit-used")?.let { limit - it }
         val resetAtMs = conn.headerLong("x-ratelimit-reset")?.let { normaliseResetToMs(it, now) }
 
         val spacing = if (remaining != null && remaining > 0 && resetAtMs != null) {
@@ -122,26 +159,26 @@ object RateLimiter {
         val b = budget(path)
         budgets[path] = b.copy(
             spacingMs = spacing.coerceIn(200L, MAX_SPACING_MS),
+            periodMs = periodMs.coerceIn(1_000L, MAX_BLOCK_MS),
             blockedUntilMs = maxOf(b.blockedUntilMs, blockedUntil).coerceAtMost(now + MAX_BLOCK_MS),
         )
     }
 
-    /** A 429 came back: respect `Retry-After`, or back off for one period. */
+    /**
+     * A 429 came back: wait out the window.
+     *
+     * [observe] has already run on the same response, so if the server sent
+     * `x-ratelimit-reset` the block is set from it and this only ever extends that — never
+     * shortens it, which would just walk straight into a second 429. `Retry-After` is
+     * honoured when present; the documentation does not promise it, so the fallback is a
+     * full period rather than a guess derived from the spacing.
+     */
     fun onRateLimited(path: String, retryAfterSec: Int?) {
         val b = budget(path)
-        val waitMs = ((retryAfterSec?.times(1000L)) ?: (b.spacingMs * 4)).coerceAtMost(MAX_BLOCK_MS)
-        budgets[path] = b.copy(blockedUntilMs = System.currentTimeMillis() + waitMs)
-    }
-
-    /**
-     * Drops every "wait longer" penalty, keeping the ordinary per-endpoint spacing.
-     *
-     * Used when the user explicitly asks for a refresh. Spacing is a second or five, so the
-     * real rate limit is still respected; what gets cleared is the accumulated punishment
-     * that would otherwise make a button press do nothing at all.
-     */
-    fun clearPenalties() {
-        budgets.replaceAll { _, b -> b.copy(blockedUntilMs = 0L) }
+        val waitMs = ((retryAfterSec?.times(1000L)) ?: b.periodMs).coerceAtMost(MAX_BLOCK_MS)
+        budgets[path] = b.copy(
+            blockedUntilMs = maxOf(b.blockedUntilMs, System.currentTimeMillis() + waitMs),
+        )
     }
 
     /**
@@ -158,8 +195,14 @@ object RateLimiter {
         return now
     }
 
+    /** Seconds until [path] is free, rounded up. 0 when it is free right now. */
+    fun waitSeconds(path: String): Int = ((waitMs(path) + 999L) / 1000L).toInt()
+
     /** Forgets all pacing state. Used when credentials change. */
-    fun reset() = budgets.clear()
+    fun reset() {
+        budgets.clear()
+        gates.clear()
+    }
 
     private fun HttpURLConnection.headerInt(name: String): Int? =
         getHeaderField(name)?.trim()?.toIntOrNull()
