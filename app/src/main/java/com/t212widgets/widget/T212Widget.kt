@@ -38,6 +38,7 @@ import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import com.t212widgets.core.Format
 import com.t212widgets.core.SecureStore
+import com.t212widgets.core.refreshIntervalSec
 import com.t212widgets.data.PortfolioRepository
 import com.t212widgets.data.Snapshot
 import com.t212widgets.refresh.RefreshScheduler
@@ -64,12 +65,15 @@ class T212Widget : GlanceAppWidget() {
         val configured = SecureStore.hasApiKey(context)
         val snapshot = PortfolioRepository.cachedSnapshot(context)
         val systemDark = WidgetPalette.isSystemDark(context)
+        // A blip is only worth reporting once the numbers have actually gone stale; give it
+        // three refresh cycles, and never less than five minutes.
+        val staleAfterMs = maxOf(5 * 60_000L, context.refreshIntervalSec * 3_000L)
 
         provideContent {
             if (!configured) {
                 SetupPrompt(WidgetPalette.of(config, systemDark))
             } else {
-                WidgetBody(context, config, snapshot, systemDark)
+                WidgetBody(context, config, snapshot, systemDark, staleAfterMs)
             }
         }
     }
@@ -94,9 +98,10 @@ class T212WidgetReceiver : GlanceAppWidgetReceiver() {
 /** Tap target on the refresh chip: forces a fetch, ignoring the local spacing floor. */
 class RefreshAction : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
-        // Broadcast callbacks get roughly ten seconds; give up cleanly rather than being
-        // killed mid-write, and let the next scheduled tick pick it up instead.
-        withTimeoutOrNull(9_000) { PortfolioRepository.refresh(context, force = true) }
+        // A backstop only: the client's own connect/read timeouts are far shorter, so a
+        // slow network fails as a timeout with an honest message instead of being cancelled
+        // here and reported as something it is not.
+        withTimeoutOrNull(20_000) { PortfolioRepository.refresh(context, force = true) }
         T212Widget().updateAll(context)
     }
 }
@@ -134,6 +139,7 @@ private fun WidgetBody(
     config: WidgetConfig,
     snapshot: Snapshot?,
     systemDark: Boolean,
+    staleAfterMs: Long,
 ) {
     val palette = WidgetPalette.of(config, systemDark)
     val width = LocalSize.current.width
@@ -173,7 +179,7 @@ private fun WidgetBody(
 
         if (config.showUpdatedAt) {
             Spacer(GlanceModifier.height(4.dp))
-            FooterLine(palette, snapshot)
+            FooterLine(palette, snapshot, staleAfterMs)
         }
     }
 }
@@ -311,8 +317,11 @@ private fun SingleHolding(
     val headline = WidgetValues.positionField(context, snapshot, config, position, headlineField)
 
     Column(modifier = GlanceModifier.fillMaxSize()) {
+        // When the header is on it already carries the holding's name, so repeat the name
+        // there and you get "Reddit" twice with nothing saying what the big number means.
+        // Label the figure instead; fall back to the name only when there is no header.
         Text(
-            snapshot.displayName(position.ticker),
+            if (config.showHeader) headlineField.label else snapshot.displayName(position.ticker),
             maxLines = 1,
             style = TextStyle(color = palette.muted, fontSize = 11.sp),
         )
@@ -420,17 +429,28 @@ private fun EmptyState(palette: WidgetPalette, error: String?) {
     }
 }
 
+/**
+ * The "updated 3m ago" line, and a warning only when one is actually warranted.
+ *
+ * A failed refresh does not mean the figures on screen are wrong — they are simply the last
+ * good ones. Showing a red warning the instant any request fails made a perfectly healthy
+ * widget look broken, so the warning now appears only when the user genuinely needs to know:
+ * either the failure requires them to act (a rejected key), or the data has been stuck long
+ * enough to stop being trustworthy.
+ */
 @Composable
-private fun FooterLine(palette: WidgetPalette, snapshot: Snapshot) {
-    val stale = snapshot.error != null
+private fun FooterLine(palette: WidgetPalette, snapshot: Snapshot, staleAfterMs: Long) {
+    val ageMs = System.currentTimeMillis() - snapshot.fetchedAtMs
+    val neverFetched = snapshot.fetchedAtMs <= 0L
+    val warn = snapshot.error != null &&
+        (snapshot.needsAttention || neverFetched || ageMs > staleAfterMs)
+
     Text(
-        buildString {
-            if (stale) append("⚠ ").append(snapshot.error).append(" · ")
-            append(Format.relativeTime(snapshot.fetchedAtMs))
-        },
+        if (warn) "⚠ ${snapshot.error} · ${Format.relativeTime(snapshot.fetchedAtMs)}"
+        else Format.relativeTime(snapshot.fetchedAtMs),
         maxLines = 1,
         style = TextStyle(
-            color = if (stale) palette.loss else palette.muted,
+            color = if (warn) palette.loss else palette.muted,
             fontSize = 10.sp,
         ),
     )

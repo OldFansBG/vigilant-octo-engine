@@ -59,16 +59,24 @@ class RefreshReceiver : BroadcastReceiver() {
      * network can never break the chain and leave the widgets frozen forever.
      */
     private fun tick(context: Context, screenOn: Boolean, force: Boolean = false) {
+        // Book the next tick *first*. Doing it in a `finally` looked equivalent but was not:
+        // if the system kills the process mid-refresh, the finally never runs and the chain
+        // dies until the 15-minute fallback notices. Scheduling up front makes the chain
+        // survive anything that can happen to this process.
+        RefreshScheduler.scheduleNextTick(context, screenOn = screenOn)
+
+        if (!RefreshScheduler.shouldPollNow(context, screenOn)) return
+
         val pending = goAsync()
         scope.launch {
             try {
-                if (RefreshScheduler.shouldPollNow(context, screenOn)) {
-                    withTimeoutOrNull(9_000) {
-                        RefreshScheduler.refreshAndRedraw(context, force = force)
-                    }
+                // Comfortably longer than the client's own connect+read timeouts, so a slow
+                // request fails as a timeout with a truthful message rather than being
+                // cancelled here and mislabelled.
+                withTimeoutOrNull(REFRESH_DEADLINE_MS) {
+                    RefreshScheduler.refreshAndRedraw(context, force = force)
                 }
             } finally {
-                RefreshScheduler.scheduleNextTick(context, screenOn = screenOn)
                 pending.finish()
             }
         }
@@ -76,6 +84,9 @@ class RefreshReceiver : BroadcastReceiver() {
 
     private companion object {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+        /** Backstop only — the HTTP client's own timeouts should always fire first. */
+        const val REFRESH_DEADLINE_MS = 20_000L
     }
 }
 

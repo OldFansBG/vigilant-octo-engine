@@ -12,6 +12,11 @@ import org.json.JSONObject
  * any time, so the last good snapshot is persisted to disk. [error] is kept *alongside* the
  * data rather than replacing it: when a refresh fails the widget keeps showing the last
  * known figures with a staleness marker, which is far more useful than blanking out.
+ *
+ * [needsAttention] separates "you have to go and fix something" (a rejected key, a missing
+ * permission) from "this will very likely sort itself out" (a slow request, a rate limit).
+ * Only the former is worth putting a warning on the home screen for; the latter, shown
+ * eagerly, makes a working widget look broken.
  */
 data class Snapshot(
     val fetchedAtMs: Long,
@@ -19,6 +24,7 @@ data class Snapshot(
     val summary: AccountSummary?,
     val positions: List<Position>,
     val error: String? = null,
+    val needsAttention: Boolean = false,
 ) {
     val isEmpty: Boolean get() = summary == null && positions.isEmpty()
 
@@ -32,6 +38,7 @@ data class Snapshot(
         o.put("fetchedAtMs", fetchedAtMs)
         o.put("currency", currency)
         o.put("error", error ?: JSONObject.NULL)
+        o.put("needsAttention", needsAttention)
         summary?.let { s ->
             o.put(
                 "summary",
@@ -103,6 +110,7 @@ data class Snapshot(
                 summary = o.optJSONObject("summary")?.let(AccountSummary::fromJson),
                 positions = o.optJSONArray("positions")?.let(Position::listFromJson).orEmpty(),
                 error = if (o.isNull("error")) null else o.optString("error").ifEmpty { null },
+                needsAttention = o.optBoolean("needsAttention", false),
             )
         }.getOrNull()
     }

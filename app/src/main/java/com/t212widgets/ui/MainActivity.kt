@@ -681,7 +681,15 @@ private fun troubleshoot(error: ApiError, entered: Credentials): List<String>? =
         "Trading 212 is throttling requests. Wait a minute and try again.",
         "If this keeps happening, raise the refresh interval below.",
     )
-    is ApiError.Network -> listOf(
+    is ApiError.Offline -> listOf(
+        "The phone reports no working internet connection. Check Wi-Fi or mobile data.",
+    )
+    is ApiError.Timeout -> listOf(
+        "The phone reached Trading 212 but got no answer in time — usually a slow " +
+            "connection or a brief outage on their side. Try again in a moment.",
+        "Your widgets keep showing the last good figures in the meantime.",
+    )
+    is ApiError.Unreachable -> listOf(
         "The request never reached Trading 212. Check the phone is online.",
         "A VPN or a filtering DNS service can block trading212.com — try turning it off.",
     )

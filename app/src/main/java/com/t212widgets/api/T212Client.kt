@@ -1,10 +1,13 @@
 package com.t212widgets.api
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.t212widgets.core.Credentials
 import com.t212widgets.core.Environment
 import com.t212widgets.core.SecureStore
 import com.t212widgets.core.environment
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -12,18 +15,36 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.UnknownHostException
 import java.util.zip.GZIPInputStream
 import javax.net.ssl.HttpsURLConnection
 
-/** What went wrong, in terms the widget can render in one short line. */
+/**
+ * What went wrong, in terms the widget can render in one short line.
+ *
+ * The connectivity failures are split three ways on purpose. Lumping them together produced
+ * "Offline or unreachable" on a phone that was demonstrably online, because a request that
+ * merely ran slow was reported the same way as a dead network — which tells the user nothing
+ * and looks like the app is broken when it is not.
+ */
 sealed class ApiError(val message: String) {
     object NoKey : ApiError("No API key set — open the app")
     object Unauthorised : ApiError("API key rejected (401)")
     object Forbidden : ApiError("Key is missing a permission (403)")
     class RateLimited(val retryAfterSec: Int?) : ApiError("Rate limited — backing off")
     class Http(val code: Int) : ApiError("Server error $code")
-    class Network(val detail: String) : ApiError("Offline or unreachable")
+
+    /** The device itself has no usable network. */
+    object Offline : ApiError("No internet connection")
+
+    /** We are online; Trading 212 did not answer in time. */
+    object Timeout : ApiError("Trading 212 didn't respond")
+
+    /** Online, but the request failed for some other transport reason. */
+    class Unreachable(val detail: String) : ApiError("Couldn't reach Trading 212")
+
     class Parse(val detail: String) : ApiError("Unexpected response")
 }
 
@@ -48,8 +69,11 @@ sealed class ApiResult<out T> {
  */
 class T212Client(private val context: Context) {
 
-    private val connectTimeoutMs = 10_000
-    private val readTimeoutMs = 15_000
+    // These must stay comfortably inside the deadline the caller imposes (see
+    // RefreshReceiver), otherwise a merely-slow request is cancelled and looks like an
+    // outage. Both calls run in parallel, so the worst case is roughly readTimeoutMs.
+    private val connectTimeoutMs = 5_000
+    private val readTimeoutMs = 8_000
 
     suspend fun accountSummary(): ApiResult<AccountSummary> =
         getObject(PATH_SUMMARY).flatMap { parse { AccountSummary.fromJson(it) } }
@@ -74,7 +98,7 @@ class T212Client(private val context: Context) {
 
         // Try the environment the user picked first, so the common case is one request.
         val environments = listOf(preferred) + Environment.entries.filter { it != preferred }
-        var bestError: ApiError = ApiError.Network("not attempted")
+        var bestError: ApiError = ApiError.Unreachable("not attempted")
 
         for (environment in environments) {
             when (val r = request(PATH_SUMMARY, credentials, environment)) {
@@ -88,7 +112,11 @@ class T212Client(private val context: Context) {
                 is ApiResult.Err -> {
                     // Being offline or rate limited says nothing about the credentials, so
                     // stop rather than reporting a misleading "key rejected".
-                    if (r.error is ApiError.Network || r.error is ApiError.RateLimited) {
+                    if (r.error is ApiError.Offline ||
+                        r.error is ApiError.Timeout ||
+                        r.error is ApiError.Unreachable ||
+                        r.error is ApiError.RateLimited
+                    ) {
                         return@withContext ApiResult.Err(r.error)
                     }
                     // A 403 means the credentials authenticated but lack a permission — far
@@ -127,10 +155,34 @@ class T212Client(private val context: Context) {
                 else -> ApiResult.Err(errorFor(code, conn))
             }
         }
+    } catch (e: CancellationException) {
+        // Never swallow this. A cancelled coroutine is our own deadline firing, not a
+        // failure of the request — catching it as one is what put a bogus "offline" banner
+        // on a widget whose phone was plainly online.
+        throw e
     } catch (e: Exception) {
         // Only the exception's class name is kept: messages from the URL stack can carry the
         // request URL, and nothing derived from the credentials should ever escape here.
-        ApiResult.Err(ApiError.Network(e.javaClass.simpleName))
+        ApiResult.Err(transportError(e))
+    }
+
+    /** Turns a transport exception into something a user can act on. */
+    private fun transportError(e: Exception): ApiError = when {
+        !hasNetwork() -> ApiError.Offline
+        e is SocketTimeoutException -> ApiError.Timeout
+        e is UnknownHostException -> ApiError.Offline
+        else -> ApiError.Unreachable(e.javaClass.simpleName)
+    }
+
+    /**
+     * Whether the device believes it has a working internet connection. Used only to label
+     * a failure correctly; a wrong answer here can never block a request.
+     */
+    private fun hasNetwork(): Boolean {
+        val manager = context.getSystemService(ConnectivityManager::class.java) ?: return true
+        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
     private fun openConnection(

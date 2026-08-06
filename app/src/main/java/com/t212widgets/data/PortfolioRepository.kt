@@ -71,7 +71,13 @@ object PortfolioRepository {
         val existing = cachedSnapshot(app)
 
         if (!SecureStore.hasApiKey(app)) {
-            return@withLock store(app, (existing ?: empty()).copy(error = ApiError.NoKey.message))
+            return@withLock store(
+                app,
+                (existing ?: empty()).copy(
+                    error = ApiError.NoKey.message,
+                    needsAttention = true,
+                ),
+            )
         }
         if (now < backoffUntilMs) return@withLock existing ?: empty()
         if (!force && now - lastFetchAtMs < MIN_SPACING_MS && existing != null) return@withLock existing
@@ -98,6 +104,7 @@ object PortfolioRepository {
                 positions = (positionsResult as? ApiResult.Ok)?.value
                     ?: existing?.positions.orEmpty(),
                 error = firstError.message,
+                needsAttention = firstError.needsUserAction(),
             )
             return@withLock store(app, merged)
         }
@@ -119,6 +126,7 @@ object PortfolioRepository {
             summary = summary,
             positions = positions,
             error = null,
+            needsAttention = false,
         )
         DailyBaseline.observe(app, snapshot)
         store(app, snapshot)
@@ -147,6 +155,10 @@ object PortfolioRepository {
         }
         return snapshot
     }
+
+    /** True when the user has to change something before refreshes can ever succeed. */
+    private fun ApiError.needsUserAction(): Boolean =
+        this is ApiError.NoKey || this is ApiError.Unauthorised || this is ApiError.Forbidden
 
     private fun noteFailure(error: ApiError) {
         consecutiveFailures++
