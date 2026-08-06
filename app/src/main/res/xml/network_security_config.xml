@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is off everywhere, with no per-domain exception, so the API key can only ever
+  leave the device inside TLS. User-added CA certificates are excluded from the trust anchors
+  as well: that stops a proxy installed on the phone (deliberately or not) from decrypting
+  the request and reading the key.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

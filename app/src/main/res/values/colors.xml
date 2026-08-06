@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="window_background">#FFF7F8FA</color>
+    <color name="widget_preview_background">#FF15181D</color>
+    <color name="accent">#FF2F6FED</color>
+    <color name="gain">#FF4ADE80</color>
+    <color name="muted">#FF98A2B3</color>
+    <color name="on_dark">#FFF2F4F7</color>
+    <color name="launcher_background">#FF15181D</color>
+</resources>
