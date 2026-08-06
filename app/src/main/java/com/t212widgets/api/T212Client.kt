@@ -149,10 +149,14 @@ class T212Client(private val context: Context) {
         environment: Environment,
     ): ApiResult<String> = try {
         openConnection(path, credentials, environment).use { conn ->
-            when (val code = conn.responseCode) {
+            val code = conn.responseCode
+            // Read the budget off every answered request, including errors — that is how
+            // the client learns the real pace rather than assuming the documented one.
+            RateLimiter.observe(path, conn)
+            when (code) {
                 in 200..299 ->
                     ApiResult.Ok(decodedStream(conn).bufferedReader().use(BufferedReader::readText))
-                else -> ApiResult.Err(errorFor(code, conn))
+                else -> ApiResult.Err(errorFor(path, code, conn))
             }
         }
     } catch (e: CancellationException) {
@@ -213,17 +217,21 @@ class T212Client(private val context: Context) {
         }
     }
 
-    private fun errorFor(code: Int, conn: HttpURLConnection): ApiError {
+    private fun errorFor(path: String, code: Int, conn: HttpURLConnection): ApiError {
         runCatching { conn.errorStream?.close() }
         return when (code) {
             401 -> ApiError.Unauthorised
             403 -> ApiError.Forbidden
-            429 -> ApiError.RateLimited(conn.getHeaderField("Retry-After")?.toIntOrNull())
+            429 -> {
+                val retryAfter = conn.getHeaderField("Retry-After")?.toIntOrNull()
+                RateLimiter.onRateLimited(path, retryAfter)
+                ApiError.RateLimited(retryAfter)
+            }
             else -> ApiError.Http(code)
         }
     }
 
-    private companion object {
+    companion object {
         const val PATH_SUMMARY = "/api/v0/equity/account/summary"
         const val PATH_POSITIONS = "/api/v0/equity/positions"
     }

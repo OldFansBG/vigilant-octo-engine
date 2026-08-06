@@ -6,8 +6,9 @@ updates too slowly and shows the same thing to everybody.
 - **You design each widget.** Pick what it shows, which figures, in what order, how it is
   sorted, what it is called, and what it looks like. Place it five times and get five
   different widgets.
-- **It updates as fast as Android allows.** Down to every 15 seconds, and instantly the
-  moment you turn the screen on — not on the 30-minute timer the widget framework imposes.
+- **It updates as fast as the API allows.** One second in the live view, down to five in a
+  widget, and instantly the moment you turn the screen on — not on the 30-minute timer the
+  widget framework imposes.
 - **Your API credentials stay sealed on the device.** Hardware-backed encryption, read-only
   scopes, no server of ours anywhere in the path.
 
@@ -130,7 +131,7 @@ periodic job at 15. Both are too slow, so this app does not rely on either as it
 mechanism. `updatePeriodMillis` is set to `0` — the framework timer is switched off entirely
 — and three things drive updates instead:
 
-1. **A self-rescheduling alarm** at your chosen interval, from 15 seconds up. Each tick
+1. **A self-rescheduling alarm** at your chosen interval, from 5 seconds up. Each tick
    fetches, redraws, and books the next tick, so a failure can never break the chain.
 2. **Screen-on and unlock triggers.** The instant the display wakes, a refresh fires. By the
    time the home screen is drawn the numbers are current. While the phone is in your pocket
@@ -144,11 +145,31 @@ system cannot defer. It costs a permanent notification and noticeably more batte
 limits it to roughly six hours a day, and the app hands back to the normal scheduler
 automatically when that budget runs out. It is off by default and almost nobody needs it.
 
-**Rate limits are respected.** Trading 212 allows one `/equity/account/summary` call every 5
-seconds and one `/equity/positions` call per second. The app enforces a 6-second floor between
-network refreshes regardless of your interval setting, collapses concurrent requests from
-multiple widgets into a single fetch, and backs off exponentially on a `429`. Ten widgets on
+**Rate limits are respected, per endpoint.** `/equity/positions` allows one call per second
+and `/equity/account/summary` one per five, so they are paced separately — holding both to a
+single shared floor is what used to make the value jump in steps. Every response carries
+`x-ratelimit-*` headers and the app paces itself from those, falling back to the documented
+figures, so it stays correct if Trading 212 retunes a limit. Concurrent requests from
+multiple widgets collapse into a single fetch, and a `429` arms a backoff. Ten widgets on
 your home screen cost exactly the same API traffic as one.
+
+## Live view
+
+Tap **Open live view** in the app for the fast version:
+
+- **Updates every second** — the fastest the API permits. `/equity/positions` carries live
+  prices and per-holding values, so the account total is recomputed each second by swapping
+  the summary's investments component for the freshly summed positions. The cash side is
+  taken as reported. Nothing is interpolated or invented; you see £130.94 → £130.91 → £130.88
+  rather than a jump once a minute.
+- **A chart you can scrub.** Drag a finger across it and the headline switches from "now" to
+  the moment under your finger, with its timestamp. Ranges from 5 minutes to everything
+  recorded. Pick the whole account or any single holding.
+- Polling stops the instant the screen is not in the foreground, so it never runs down the
+  battery in your pocket. The screen is kept awake while it is open.
+
+Widgets are bounded by what Android lets a background alarm do, so they are best-effort at
+short intervals; the live view is the place to actually watch a value move.
 
 ## Security
 
@@ -197,8 +218,14 @@ Honest ones, from the API rather than from this app:
   public API exposes no previous-close or intraday-open figure, so a true daily change cannot
   be computed. The app records the first values it sees after local midnight and reports
   movement against those. Anything derived from it is labelled *since first update today*.
-- **Prices are as fresh as the API makes them,** which is not a live tick feed. Do not trade
+- **Prices are as fresh as the API makes them,** which is a one-second poll, not a push tick
+  feed. Trading 212 publishes no WebSocket or streaming endpoint — the whole API is
+  request/response — so one second is the floor, not a limitation of this app. Do not trade
   on these figures.
+- **The chart is recorded, not fetched.** The API exposes no intraday price or
+  portfolio-value history, only current state and settled historical events. So the chart is
+  built from samples this app records while it runs, which is why it starts empty and fills
+  in. That also means it shows exactly what your device observed.
 - **Sub-minute intervals need the exact-alarm permission** to hold precisely. Without it the
   app asks for a timing window instead and updates drift by a few seconds. It never breaks —
   it just loosens.
@@ -218,6 +245,8 @@ Built against the current public API, as documented at
 | Practice | `https://demo.trading212.com` |
 | Account | `GET /api/v0/equity/account/summary` — 1 req / 5s |
 | Positions | `GET /api/v0/equity/positions` — 1 req / 1s |
+| Pacing | `x-ratelimit-limit` / `-period` / `-remaining` / `-reset` read from every response |
+| Streaming | none — the API is request/response only |
 
 Credentials are environment-specific and cannot be used across Live and Practice.
 

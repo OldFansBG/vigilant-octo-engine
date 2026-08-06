@@ -3,6 +3,7 @@ package com.t212widgets.data
 import android.content.Context
 import com.t212widgets.api.ApiError
 import com.t212widgets.api.ApiResult
+import com.t212widgets.api.RateLimiter
 import com.t212widgets.api.T212Client
 import com.t212widgets.core.SecureStore
 import com.t212widgets.core.accountCurrency
@@ -21,10 +22,11 @@ import java.util.concurrent.atomic.AtomicReference
  *  1. **Single-flight.** Ten widgets waking on the same alarm produce one pair of HTTP round
  *     trips, not ten. Concurrent callers await the in-flight refresh instead of starting
  *     their own.
- *  2. **Rate-limit respect.** Trading 212 caps `/equity/account/summary` at 1 request per 5s
- *     and `/equity/positions` at 1 per 1s, and answers 429 past that. A minimum spacing is
- *     enforced locally, and a 429 arms an exponential backoff so a rate-limited app does not
- *     spend the next hour hammering a closed door.
+ *  2. **Per-endpoint pacing.** `/equity/positions` allows one request per second and
+ *     `/equity/account/summary` one per five, so they are paced independently by
+ *     [RateLimiter]. Holding both to a single shared floor is what made the value move in
+ *     visible steps instead of drifting: prices could only ever be as fresh as the slowest
+ *     endpoint. Positions can now be polled on their own at 1 Hz.
  *  3. **Stale-while-error.** A failed refresh never destroys the last good snapshot; the
  *     error rides along on it so widgets can show "last updated 4m ago" instead of blanking.
  */
@@ -32,13 +34,9 @@ object PortfolioRepository {
 
     private const val SNAPSHOT_FILE = "snapshot.json"
 
-    /** Local floor between network refreshes, above the tightest documented endpoint cap. */
-    private const val MIN_SPACING_MS = 6_000L
-
     private val mutex = Mutex()
     private val cached = AtomicReference<Snapshot?>(null)
 
-    @Volatile private var lastFetchAtMs = 0L
     @Volatile private var backoffUntilMs = 0L
     @Volatile private var consecutiveFailures = 0
 
@@ -52,11 +50,9 @@ object PortfolioRepository {
         return loaded
     }
 
-    /** True when a network refresh would actually happen right now. */
-    fun canRefreshNow(): Boolean {
-        val now = System.currentTimeMillis()
-        return now >= backoffUntilMs && now - lastFetchAtMs >= MIN_SPACING_MS
-    }
+    /** True when a positions poll would actually reach the network right now. */
+    fun canRefreshNow(): Boolean =
+        System.currentTimeMillis() >= backoffUntilMs && RateLimiter.isReady(T212Client.PATH_POSITIONS)
 
     /**
      * Fetches the account summary and open positions in parallel, then stores the merged
@@ -80,14 +76,21 @@ object PortfolioRepository {
             )
         }
         if (now < backoffUntilMs) return@withLock existing ?: empty()
-        if (!force && now - lastFetchAtMs < MIN_SPACING_MS && existing != null) return@withLock existing
 
-        lastFetchAtMs = now
         val client = T212Client(app)
 
+        // Each endpoint waits only for its own budget. A forced refresh still waits — the
+        // limit is per account and blowing through it just earns a 429 — but the summary
+        // being on a 5s leash no longer holds the 1s positions poll back.
         val (summaryResult, positionsResult) = coroutineScope {
-            val summary = async { client.accountSummary() }
-            val positions = async { client.positions() }
+            val summary = async {
+                RateLimiter.acquire(T212Client.PATH_SUMMARY)
+                client.accountSummary()
+            }
+            val positions = async {
+                RateLimiter.acquire(T212Client.PATH_POSITIONS)
+                client.positions()
+            }
             summary.await() to positions.await()
         }
 
@@ -129,17 +132,78 @@ object PortfolioRepository {
             needsAttention = false,
         )
         DailyBaseline.observe(app, snapshot)
+        recordHistory(app, snapshot)
         store(app, snapshot)
+    }
+
+    /**
+     * Polls **only** open positions, at the 1 Hz that endpoint allows.
+     *
+     * This is what makes the value move smoothly rather than in jumps. Positions carry both
+     * `currentPrice` and `walletImpact.currentValue`, so a full live portfolio value can be
+     * recomputed every second without touching the 5-second account summary; the cash side
+     * of the account barely changes tick to tick, so re-reading it that often buys nothing.
+     *
+     * Every successful poll is recorded into [ValueHistory], which is what the chart draws.
+     */
+    suspend fun refreshPositions(context: Context): Snapshot = mutex.withLock {
+        val app = context.applicationContext
+        val existing = cachedSnapshot(app) ?: empty()
+
+        if (!SecureStore.hasApiKey(app)) return@withLock existing
+        if (System.currentTimeMillis() < backoffUntilMs) return@withLock existing
+
+        RateLimiter.acquire(T212Client.PATH_POSITIONS)
+        when (val result = T212Client(app).positions()) {
+            is ApiResult.Err -> {
+                noteFailure(result.error)
+                store(
+                    app,
+                    existing.copy(
+                        error = result.error.message,
+                        needsAttention = result.error.needsUserAction(),
+                    ),
+                )
+            }
+            is ApiResult.Ok -> {
+                consecutiveFailures = 0
+                backoffUntilMs = 0
+                val updated = existing.copy(
+                    fetchedAtMs = System.currentTimeMillis(),
+                    positions = result.value,
+                    error = null,
+                    needsAttention = false,
+                )
+                recordHistory(app, updated)
+                store(app, updated)
+            }
+        }
+    }
+
+    /**
+     * Appends the live account value and each holding's price to the chart history.
+     *
+     * The account value used is [Snapshot.liveTotalValue] rather than the summary's
+     * `totalValue`, so the series tracks the 1 Hz positions data instead of stepping once
+     * every five seconds when the summary happens to refresh.
+     */
+    private fun recordHistory(context: Context, snapshot: Snapshot) {
+        val at = snapshot.fetchedAtMs
+        snapshot.liveTotalValue?.let { ValueHistory.record(context, ValueHistory.SERIES_ACCOUNT, it, at) }
+        snapshot.positions.forEach { p ->
+            ValueHistory.record(context, ValueHistory.seriesForTicker(p.ticker), p.currentPrice, at)
+        }
     }
 
     /** Drops every cached artefact. Used when the credentials or environment change. */
     fun invalidate(context: Context) {
         val app = context.applicationContext
         cached.set(null)
-        lastFetchAtMs = 0
         backoffUntilMs = 0
+        RateLimiter.reset()
         consecutiveFailures = 0
         runCatching { File(app.filesDir, SNAPSHOT_FILE).delete() }
+        ValueHistory.clear(app)
         DailyBaseline.clear(app)
         app.accountCurrency = ""
     }

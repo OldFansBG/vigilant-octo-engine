@@ -28,6 +28,34 @@ data class Snapshot(
 ) {
     val isEmpty: Boolean get() = summary == null && positions.isEmpty()
 
+    /**
+     * Account value using the freshest position prices available.
+     *
+     * The summary's own `totalValue` is only as new as the last 5-second summary poll, while
+     * positions refresh every second. Swapping the summary's investments component for the
+     * live sum of `walletImpact.currentValue` keeps the cash side exactly as reported and
+     * updates the invested side at the positions cadence — so the figure drifts with the
+     * market instead of stepping whenever the summary catches up.
+     *
+     * Both sides are already in the account currency, so this is a straight substitution
+     * with no conversion invented anywhere.
+     */
+    val liveTotalValue: Double?
+        get() {
+            val s = summary ?: return null
+            if (positions.isEmpty()) return s.totalValue
+            val livePositions = positions.sumOf { it.marketValue }
+            return s.totalValue - s.investmentsValue + livePositions
+        }
+
+    /** Live unrealised P/L, on the same freshest-prices basis as [liveTotalValue]. */
+    val liveUnrealizedProfitLoss: Double?
+        get() {
+            val s = summary ?: return null
+            if (positions.isEmpty()) return s.unrealizedProfitLoss
+            return positions.sumOf { it.unrealizedProfitLoss }
+        }
+
     fun position(ticker: String): Position? = positions.firstOrNull { it.ticker == ticker }
 
     fun displayName(ticker: String): String =

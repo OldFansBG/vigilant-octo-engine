@@ -52,6 +52,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Live value + scrubbable chart; polls at 1 Hz while it is on screen. -->
+        <activity
+            android:name=".ui.LiveActivity"
+            android:exported="false"
+            android:label="Live" />
+
         <!-- Launched by the home screen when a widget is dropped or reconfigured. -->
         <activity
             android:name=".ui.WidgetConfigActivity"

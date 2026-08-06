@@ -20,11 +20,18 @@ object Settings {
     internal const val K_REQUIRE_AUTH = "require_auth_to_reveal"
     internal const val K_ACCOUNT_CCY = "account_currency"
 
-    /** Trading 212 rate-limits `/equity/account/summary` to one call every 5s. */
-    const val MIN_INTERVAL_SEC = 15
-    const val DEFAULT_INTERVAL_SEC = 60
+    /**
+     * Pacing is enforced per endpoint by RateLimiter, so this is purely how often the widget
+     * asks. Five seconds matches the account summary's own limit — asking faster than that
+     * cannot produce a fresher summary, only wasted wake-ups.
+     *
+     * Alarms this tight are best-effort: Android will not deliver them to the second on
+     * every device. The live view in the app is the place to watch a value move.
+     */
+    const val MIN_INTERVAL_SEC = 5
+    const val DEFAULT_INTERVAL_SEC = 30
 
-    val INTERVAL_CHOICES = listOf(15, 30, 60, 120, 300, 900, 1800)
+    val INTERVAL_CHOICES = listOf(5, 10, 15, 30, 60, 300, 900)
 
     fun isConfigured(context: Context): Boolean = SecureStore.hasApiKey(context)
 }

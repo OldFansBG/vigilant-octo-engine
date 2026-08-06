@@ -37,25 +37,28 @@ object WidgetValues {
         fun signed(v: Double) = Cell(fmtSignedMoney(v, ccy, config), v.direction())
 
         return when (metric) {
-            Metric.ACCOUNT_TOTAL -> money(s.totalValue)
+            // Freshest-prices basis: positions refresh far more often than the summary.
+            Metric.ACCOUNT_TOTAL -> money(snapshot.liveTotalValue ?: s.totalValue)
             Metric.INVESTMENTS_VALUE -> money(s.investmentsValue)
             Metric.INVESTED -> money(s.investmentsCost)
             Metric.FREE_CASH -> money(s.availableToTrade)
-            Metric.OPEN_PL -> signed(s.unrealizedProfitLoss)
+            Metric.OPEN_PL -> signed(snapshot.liveUnrealizedProfitLoss ?: s.unrealizedProfitLoss)
             Metric.OPEN_PL_PCT -> Cell(
                 Format.signedPercent(s.unrealizedReturnPct, config.decimals),
                 s.unrealizedProfitLoss.direction(),
             )
             Metric.TODAY_CHANGE -> {
                 val base = DailyBaseline.accountTotal(context)
-                if (base == null) Cell.PENDING else signed(s.totalValue - base)
+                val now = snapshot.liveTotalValue ?: s.totalValue
+                if (base == null) Cell.PENDING else signed(now - base)
             }
             Metric.TODAY_CHANGE_PCT -> {
                 val base = DailyBaseline.accountTotal(context)
+                val now = snapshot.liveTotalValue ?: s.totalValue
                 if (base == null || base == 0.0) {
                     Cell.PENDING
                 } else {
-                    val pct = (s.totalValue - base) / base * 100.0
+                    val pct = (now - base) / base * 100.0
                     Cell(Format.signedPercent(pct, config.decimals), pct.direction())
                 }
             }

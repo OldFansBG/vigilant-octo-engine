@@ -386,6 +386,19 @@ private fun SetupScreen(
                         }
                     }
                     Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            context.startActivity(Intent(context, LiveActivity::class.java))
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Open live view") }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Updates every second and charts the movement — drag a finger across " +
+                            "the chart to read any moment.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = {
                             scope.launch {
