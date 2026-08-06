@@ -41,6 +41,18 @@ object RateLimiter {
      */
     private const val SAFETY_FACTOR = 1.15
 
+    /**
+     * Hard ceilings on anything derived from server headers.
+     *
+     * `acquire` suspends until a path is allowed, so a nonsensical header — a reset stamped
+     * in milliseconds instead of seconds, a clock skew, a stray large number — could
+     * otherwise park a refresh for hours with no visible failure at all: no request, no
+     * error, a widget frozen on its last value. Clamping keeps a bad header a nuisance
+     * rather than a hang.
+     */
+    private const val MAX_SPACING_MS = 60_000L
+    private const val MAX_BLOCK_MS = 120_000L
+
     private data class Budget(
         val spacingMs: Long,
         val lastRequestAtMs: Long = 0L,
@@ -88,36 +100,62 @@ object RateLimiter {
 
         val evenSpacing = (periodSec * 1000.0 / limit * SAFETY_FACTOR).toLong().coerceAtLeast(200L)
 
+        val now = System.currentTimeMillis()
         val remaining = conn.headerInt("x-ratelimit-remaining")
-        val resetAtSec = conn.headerLong("x-ratelimit-reset")
-        val spacing = if (remaining != null && remaining <= 0 && resetAtSec != null) {
-            // Budget exhausted: hold off entirely until the window resets.
-            evenSpacing
-        } else if (remaining != null && resetAtSec != null && remaining > 0) {
-            val msToReset = resetAtSec * 1000L - System.currentTimeMillis()
+        val resetAtMs = conn.headerLong("x-ratelimit-reset")?.let { normaliseResetToMs(it, now) }
+
+        val spacing = if (remaining != null && remaining > 0 && resetAtMs != null) {
+            // Spread whatever is left evenly over the rest of the window.
+            val msToReset = resetAtMs - now
             if (msToReset > 0) maxOf(evenSpacing, msToReset / remaining) else evenSpacing
         } else {
             evenSpacing
         }
 
-        val blockedUntil = if (remaining != null && remaining <= 0 && resetAtSec != null) {
-            resetAtSec * 1000L
+        val blockedUntil = if (remaining != null && remaining <= 0 && resetAtMs != null) {
+            // Budget spent: wait for the window to roll over.
+            resetAtMs
         } else {
             0L
         }
 
         val b = budget(path)
         budgets[path] = b.copy(
-            spacingMs = spacing,
-            blockedUntilMs = maxOf(b.blockedUntilMs, blockedUntil),
+            spacingMs = spacing.coerceIn(200L, MAX_SPACING_MS),
+            blockedUntilMs = maxOf(b.blockedUntilMs, blockedUntil).coerceAtMost(now + MAX_BLOCK_MS),
         )
     }
 
     /** A 429 came back: respect `Retry-After`, or back off for one period. */
     fun onRateLimited(path: String, retryAfterSec: Int?) {
         val b = budget(path)
-        val waitMs = (retryAfterSec?.times(1000L)) ?: (b.spacingMs * 4)
+        val waitMs = ((retryAfterSec?.times(1000L)) ?: (b.spacingMs * 4)).coerceAtMost(MAX_BLOCK_MS)
         budgets[path] = b.copy(blockedUntilMs = System.currentTimeMillis() + waitMs)
+    }
+
+    /**
+     * Drops every "wait longer" penalty, keeping the ordinary per-endpoint spacing.
+     *
+     * Used when the user explicitly asks for a refresh. Spacing is a second or five, so the
+     * real rate limit is still respected; what gets cleared is the accumulated punishment
+     * that would otherwise make a button press do nothing at all.
+     */
+    fun clearPenalties() {
+        budgets.replaceAll { _, b -> b.copy(blockedUntilMs = 0L) }
+    }
+
+    /**
+     * `x-ratelimit-reset` is documented as a Unix timestamp in seconds, but a value in
+     * milliseconds — or a duration rather than an absolute time — would otherwise be read as
+     * a date far in the future and stall the endpoint. Anything that does not land within a
+     * plausible window of now is treated as a relative number of seconds instead.
+     */
+    private fun normaliseResetToMs(raw: Long, now: Long): Long {
+        val asSeconds = raw * 1000L
+        if (asSeconds in (now - 60_000L)..(now + MAX_BLOCK_MS)) return asSeconds
+        if (raw in (now - 60_000L)..(now + MAX_BLOCK_MS)) return raw // already milliseconds
+        if (raw in 0..600) return now + raw * 1000L // a duration, in seconds
+        return now
     }
 
     /** Forgets all pacing state. Used when credentials change. */

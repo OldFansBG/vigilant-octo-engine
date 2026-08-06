@@ -69,11 +69,12 @@ sealed class ApiResult<out T> {
  */
 class T212Client(private val context: Context) {
 
-    // These must stay comfortably inside the deadline the caller imposes (see
-    // RefreshReceiver), otherwise a merely-slow request is cancelled and looks like an
-    // outage. Both calls run in parallel, so the worst case is roughly readTimeoutMs.
-    private val connectTimeoutMs = 5_000
-    private val readTimeoutMs = 8_000
+    // Generous enough for a cold TLS handshake on mobile data — 5s was not, and turned an
+    // ordinary slow connection into a reported failure. Both calls run in parallel, so the
+    // worst case is roughly readTimeoutMs, still well inside the caller's deadline (see
+    // RefreshReceiver.REFRESH_DEADLINE_MS).
+    private val connectTimeoutMs = 10_000
+    private val readTimeoutMs = 15_000
 
     suspend fun accountSummary(): ApiResult<AccountSummary> =
         getObject(PATH_SUMMARY).flatMap { parse { AccountSummary.fromJson(it) } }
@@ -179,14 +180,24 @@ class T212Client(private val context: Context) {
     }
 
     /**
-     * Whether the device believes it has a working internet connection. Used only to label
-     * a failure correctly; a wrong answer here can never block a request.
+     * Whether the device plainly has no network. Used only to label a failure; a wrong
+     * answer here can never block a request.
+     *
+     * Deliberately does **not** consult `NET_CAPABILITY_VALIDATED`. That flag means "Android
+     * probed this network and reached the internet", and it is routinely false on connections
+     * that work perfectly: behind a VPN, behind a DNS-level ad blocker, while revalidation is
+     * in flight, and on assorted devices where the probe is blocked. Gating on it reported
+     * "No internet connection" to someone browsing the web on the same phone.
+     *
+     * Anything short of "there is no active network at all" is treated as online, so an
+     * ambiguous answer produces an honest "couldn't reach Trading 212" instead of a
+     * confident lie about the user's connection.
      */
     private fun hasNetwork(): Boolean {
         val manager = context.getSystemService(ConnectivityManager::class.java) ?: return true
-        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        val active = manager.activeNetwork ?: return false
+        val capabilities = manager.getNetworkCapabilities(active) ?: return true
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun openConnection(

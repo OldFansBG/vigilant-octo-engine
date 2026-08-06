@@ -75,7 +75,18 @@ object PortfolioRepository {
                 ),
             )
         }
-        if (now < backoffUntilMs) return@withLock existing ?: empty()
+        // A forced refresh is the user pressing a button. Swallowing it because a previous
+        // failure armed a backoff is how the app came to look completely dead: tapping the
+        // widget or "Refresh now" made no request at all and produced no feedback. An
+        // explicit instruction clears the penalty; the per-endpoint pacing below (1s/5s)
+        // still protects the actual rate limit.
+        if (force) {
+            backoffUntilMs = 0
+            consecutiveFailures = 0
+            RateLimiter.clearPenalties()
+        } else if (now < backoffUntilMs) {
+            return@withLock existing ?: empty()
+        }
 
         val client = T212Client(app)
 
@@ -150,6 +161,8 @@ object PortfolioRepository {
         val app = context.applicationContext
         val existing = cachedSnapshot(app) ?: empty()
 
+        // Returns immediately while a backoff is armed. Callers must not busy-loop on that;
+        // [canRefreshNow] tells them whether a call would actually reach the network.
         if (!SecureStore.hasApiKey(app)) return@withLock existing
         if (System.currentTimeMillis() < backoffUntilMs) return@withLock existing
 
@@ -229,10 +242,14 @@ object PortfolioRepository {
         val now = System.currentTimeMillis()
         backoffUntilMs = when (error) {
             is ApiError.RateLimited -> now + (error.retryAfterSec?.times(1000L) ?: 60_000L)
+            // Rejected credentials will not fix themselves, so wait a while.
             is ApiError.Unauthorised, is ApiError.Forbidden -> now + 300_000L
-            // 10s, 20s, 40s … capped at 5 minutes.
-            else -> now + (10_000L shl (consecutiveFailures - 1).coerceAtMost(5))
-                .coerceAtMost(300_000L)
+            // Everything else is probably a blip — a slow handshake, a lost packet, a
+            // moment between cells. 5s, 10s, 20s, capped at a minute: long enough to stop
+            // hammering, short enough that a widget recovers on its own rather than sitting
+            // dead until the user notices.
+            else -> now + (5_000L shl (consecutiveFailures - 1).coerceAtMost(4))
+                .coerceAtMost(60_000L)
         }
     }
 }

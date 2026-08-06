@@ -86,7 +86,7 @@ class RefreshReceiver : BroadcastReceiver() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
         /** Backstop only — the HTTP client's own timeouts should always fire first. */
-        const val REFRESH_DEADLINE_MS = 20_000L
+        const val REFRESH_DEADLINE_MS = 30_000L
     }
 }
 

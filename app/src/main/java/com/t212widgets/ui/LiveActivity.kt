@@ -117,9 +117,16 @@ private fun LiveScreen() {
             val updated = PortfolioRepository.refreshPositions(context)
             snapshot = updated
             tick++
-            // RateLimiter already paces to the endpoint's 1 Hz, so this is only a guard
-            // against spinning when a failure makes the call return immediately.
-            delay(if (updated.error != null) 3_000L else 150L)
+            // RateLimiter paces the endpoint to its 1 Hz from inside the call, so the delay
+            // here only exists to stop this loop spinning when a call returns without
+            // touching the network — which is what a failure backoff does.
+            delay(
+                when {
+                    !PortfolioRepository.canRefreshNow() -> 1_000L
+                    updated.error != null -> 3_000L
+                    else -> 150L
+                },
+            )
         }
     }
 
